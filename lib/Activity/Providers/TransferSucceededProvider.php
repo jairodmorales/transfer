@@ -21,9 +21,14 @@ class TransferSucceededProvider extends BaseProvider {
         }
 
         $subjectParameters = $event->getSubjectParameters();
-        $subject = str_replace("{url}", $subjectParameters["url"], $subject);
 
-        $parameters = [];
+        $parameters = [
+            "url" => [
+                "type" => "highlight",
+                "id" => $subjectParameters["url"],
+                "name" => $subjectParameters["url"],
+            ],
+        ];
 
         if (!$this->activityManager->isFormattingFilteredObject()) {
             $parameters["file"] = [

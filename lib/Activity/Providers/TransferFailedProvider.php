@@ -26,8 +26,13 @@ class TransferFailedProvider extends BaseProvider {
         }
 
         $subjectParameters = $event->getSubjectParameters();
-        $subject = str_replace("{url}", $subjectParameters["url"], $subject);
-        $event->setRichSubject($subject, []);
+        $event->setRichSubject($subject, [
+            "url" => [
+                "type" => "highlight",
+                "id" => $subjectParameters["url"],
+                "name" => $subjectParameters["url"],
+            ],
+        ]);
 
         $this->setIcon($event);
         return $event;
