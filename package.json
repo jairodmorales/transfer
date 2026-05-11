@@ -1,12 +1,13 @@
 {
   "name": "transfer",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Add a file to Nextcloud from a web link.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/beleon/transfer.git"
   },
   "author": "Daniel Thwaites",
+  "contributors": ["Leon Becker"],
   "license": "AGPL",
   "bugs": {
     "url": "https://github.com/beleon/transfer/issues"
