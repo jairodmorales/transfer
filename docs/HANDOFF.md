@@ -28,7 +28,7 @@ Nextcloud 32/33.
 - PHP 8.1+ con OCP (Nextcloud's public API)
 - Vanilla JS + Vite (sin Vue, sin React)
 - Base de datos vía `QBMapper` / `IDBConnection`
-- Background jobs con `QueuedJob`
+- Background jobs con `QueuedJob` / `TimedJob`
 
 ---
 
@@ -38,7 +38,7 @@ Nextcloud 32/33.
 - Capturar todas las excepciones de red (antes solo `BadResponseException`)
 - Agregar User-Agent, headers, `connect_timeout`, `allow_redirects`
 - Migrar `@NoAdminRequired` a atributos PHP 8 `#[NoAdminRequired]`
-- Agregar `#[UserRateLimit]` en los 3 endpoints
+- Agregar `#[UserRateLimit]` en los 4 endpoints
 - Eliminar `@NoCSRFRequired` de probe (seguridad SSRF cross-site)
 - `isValidRemoteUrl()` — rechaza `file://`, `gopher://`, etc.
 - Validación de path: bloquea `..` y null bytes
@@ -52,7 +52,7 @@ Nextcloud 32/33.
 - `TransferJobEntity` + `TransferJobMapper` (QBMapper)
 - Migración: `lib/Migration/Version0800Date20260518000000.php`
 - Token generado con `ISecureRandom` antes de encolar el job
-- Endpoint `GET /ajax/status.php` devuelve jobs de las últimas 24h del usuario
+- Endpoint `GET /ajax/status.php?since=<timestamp>` devuelve jobs del usuario
 - `TransferService::transfer()` actualiza el estado en DB en cada etapa
 - Frontend: panel flotante bottom-right con lista de jobs activos/completados
 - Polling cada 3s mientras hay jobs activos; para solo cuando todos son terminales
@@ -63,11 +63,13 @@ Nextcloud 32/33.
 ### ✅ Fase 2 — Diálogo multi-URL + Admin Settings
 - **Admin Settings**: `Administration → Additional → Transfer`
   - Campo "Maximum URLs per dialog" (1–10, default 3)
+  - Campo "Job history retention" (1–365 días, default 30)
   - Guarda via `OCP.AppConfig` JS nativo (sin controller extra)
   - Clase: `lib/Settings/Admin.php`, template: `templates/admin.php`
 - **Endpoint batch**: `POST /ajax/batch.php` (transfer#batch)
   - Acepta array de `{url, path, hashAlgo, hash}`
-  - Valida cada entrada + rechaza si `count > max_urls`
+  - Validación atómica (dos pasadas): valida todo antes de insertar nada
+  - Rechaza si `count > max_urls`
   - Devuelve array `{token, path}` por job
 - **Diálogo multi-URL**:
   - Filas dinámicas: URL + filename por fila
@@ -78,18 +80,25 @@ Nextcloud 32/33.
   - Botón "Upload" / "Upload N files"
   - Re-render solo en add/remove (no al escribir — preserva foco)
 
-### 🔲 Fase 3 — Carga de jobs al iniciar página
-- Al abrir Files, recuperar jobs de la última hora via `/ajax/status.php`
-- Mostrar en el panel los jobs que empezaron en otra pestaña o sesión anterior
-- Agregar tokens al `trackedJobs` Map y arrancar el poll si hay activos
+### ✅ Fase 3 — Carga de jobs al iniciar página
+- Al abrir Files, `initPanel()` recupera jobs de la última hora via `/ajax/status.php?since=`
+- Jobs activos (queued/running): se agregan al panel y arrancan el poll
+- Jobs terminados recientes (done/failed): se muestran 30s y se eliminan
+- Cubre transferencias iniciadas en otra pestaña o antes de recargar la página
 
-### 🔲 Fase 4 — Admin Settings completos + Cleanup job
-- Campos adicionales en admin: max_size (MB), concurrent downloads, domain blocklist, retention days
-- `TimedJob` de limpieza semanal que llama `mapper->deleteOlderThan()`
-  - El método ya existe en `TransferJobMapper::deleteOlderThan()` pero nunca se llama
-  - Registrar en `lib/AppInfo/Application.php`
+### ✅ Fase 4 — Cleanup job + retention configurable
+- `CleanupJob` (TimedJob semanal): llama `deleteOlderThan()` con ventana configurable
+- Registrado en `Application.php` via `registerBackgroundJob()`
+- Admin setting `retention_days` (1–365, default 30)
+- `max(1, $retentionDays)` en CleanupJob para evitar cutoff en el futuro
+- `validateTransferInput()` extrae la lógica de validación duplicada entre `transfer()` y `batch()`
+- `generateFilePath` → `generateUrl` corregido en todas las llamadas AJAX del JS
+
+### 🔲 Fase 5 — Notificaciones push + Tests + Admin avanzado
 - `INotifier` para notificaciones push nativas de Nextcloud al completar/fallar
 - Tests unitarios: `isValidRemoteUrl()`, `integrityCheckPasses()`, `sanitizeUrlForLog()`
+- Admin settings adicionales: `max_size_mb`, blocklist de dominios
+- Checksum por fila en modo batch (actualmente se oculta con 2+ URLs)
 
 ---
 
@@ -101,20 +110,23 @@ transfer/
 │   ├── info.xml                          # version=0.8.0, min-version=29, max-version=33
 │   └── routes.php                        # transfer, status, probe, batch
 ├── lib/
-│   ├── AppInfo/Application.php           # Bootstrap, registra LoadAdditionalScriptsListener
-│   ├── BackgroundJob/TransferJob.php     # QueuedJob, pasa token a service
-│   ├── Controller/TransferController.php # transfer(), status(), probe(), batch()
+│   ├── AppInfo/Application.php           # Bootstrap, registra listener + CleanupJob
+│   ├── BackgroundJob/
+│   │   ├── CleanupJob.php                # TimedJob semanal, deleteOlderThan(retention_days)
+│   │   └── TransferJob.php              # QueuedJob, pasa token a service
+│   ├── Controller/TransferController.php # transfer(), status(?since=), probe(), batch()
 │   ├── Db/
 │   │   ├── TransferJobEntity.php         # STATUS_QUEUED/RUNNING/DONE/FAILED
 │   │   └── TransferJobMapper.php         # findRecentByUser, updateStatus, deleteOlderThan
 │   ├── Listeners/
-│   │   └── LoadAdditionalScriptsListener.php  # Inyecta maxUrls initial state
+│   │   └── LoadAdditionalScriptsListener.php  # Inyecta maxUrls + retentionDays initial state
 │   ├── Migration/
 │   │   └── Version0800Date20260518000000.php  # Crea tabla transfer_jobs
 │   ├── Service/TransferService.php       # Descarga, verifica hash, guarda en FS
 │   └── Settings/Admin.php               # ISettings para panel de admin
 ├── src/main.js                           # Dialog multi-URL + panel de estado
-└── templates/admin.php                   # Formulario admin settings
+├── templates/admin.php                   # Formulario admin settings
+└── docs/HANDOFF.md                       # Este archivo (.gitignore local)
 ```
 
 ---
@@ -123,9 +135,9 @@ transfer/
 
 | Ruta | Verbo | Método | Rate limit | Descripción |
 |------|-------|--------|-----------|-------------|
-| `ajax/transfer.php` | POST | `transfer()` | 30/min | Encola un único job (legado) |
-| `ajax/batch.php` | POST | `batch()` | 20/min | Encola 1–N jobs (nuevo) |
-| `ajax/status.php` | GET | `status()` | 120/min | Jobs de las últimas 24h del usuario |
+| `ajax/transfer.php` | POST | `transfer()` | 30/min | Encola un único job (legacy) |
+| `ajax/batch.php` | POST | `batch()` | 20/min | Encola 1–N jobs (activo) |
+| `ajax/status.php` | GET | `status(?since=)` | 120/min | Jobs del usuario; `since` acota la ventana |
 | `ajax/probe.php` | GET | `probe()` | 60/min | HEAD request para detectar extensión |
 
 ---
@@ -158,40 +170,48 @@ transfer/
 8. **Validar `hash !== '' && hashAlgo === ''`** — sin esta validación el usuario
    puede enviar hash sin algo y el check se salta silenciosamente.
 
+9. **Validación atómica en operaciones batch**: validar todos los ítems en una primera
+   pasada antes de insertar ninguno. Si se mezcla validación con insert, un fallo en
+   el ítem N deja filas huérfanas de los ítems 1..N-1 en la DB.
+
+10. **`TimedJob::setInterval()`** acepta segundos. Usar constantes nombradas
+    (`WEEK_IN_SECONDS = 7 * 24 * 3600`) en lugar de literales para legibilidad.
+
 ### Frontend (Vanilla JS)
 
-9. **`innerHTML` + datos del servidor = XSS**. Siempre aplicar `esc()` a cualquier
-   dato de la API antes de interpolar en template literals asignados a `innerHTML`.
+11. **`innerHTML` + datos del servidor = XSS**. Siempre aplicar `esc()` a cualquier
+    dato de la API antes de interpolar en template literals asignados a `innerHTML`.
 
-10. **`loadState('appId', 'key', default)`** de `@nextcloud/initial-state` para
+12. **`loadState('appId', 'key', default)`** de `@nextcloud/initial-state` para
     leer datos inyectados desde PHP. Requiere `IInitialState::provideInitialState()`
     en el listener PHP.
 
-11. **Re-render del form en cada keystroke destruye el foco**. Separar:
+13. **Re-render del form en cada keystroke destruye el foco**. Separar:
     - `renderDialog()` — reconstrucción completa solo en cambios estructurales
     - Patches puntuales (`input.placeholder`, `btn.disabled`) para cambios de validez
 
-12. **Cada fila del multi-URL necesita su propio `probeTimer`** — si se comparte
+14. **Cada fila del multi-URL necesita su propio `probeTimer`** — si se comparte
     un timer global, los probes de diferentes filas se cancelan entre sí.
 
-13. **`generateFilePath('app', 'type', 'file.php')`** es para archivos estáticos,
-    no para rutas del controller. Para controllers usar `generateUrl('/apps/app/...')`.
-    (Pendiente de corregir — heredado del código original.)
+15. **`generateUrl('/apps/transfer/ajax/...')`** para rutas de controller.
+    `generateFilePath('app', 'type', 'file.php')` es solo para archivos estáticos.
 
-14. **Jobs en `trackedJobs` Map deben purgarse** después de terminal, si no el mapa
-    crece indefinidamente y el polling nunca para. Solución: `setTimeout` de 30s.
+16. **Jobs en `trackedJobs` Map deben purgarse** después de terminal, si no el mapa
+    crece indefinidamente y el polling nunca para. Solución: `scheduleJobPrune(token)`.
+
+17. **Doble `OCP.AppConfig.setValue`**: usar un flag `failed` además del contador `saved`
+    para evitar mostrar "Saved" si uno de los dos escrituras falló.
 
 ### Proceso / Skills
 
-15. **Siempre correr los 3 skills de Nextcloud** tras cambios:
-    `/security-review`, `/simplify`, `/review`. Son mandatorios según instrucción del usuario.
+18. **Siempre correr los 3 skills de Nextcloud** tras cambios:
+    `/security-review`, `/simplify`, `/review`. Son mandatorios.
 
-16. **`git remote set-head origin <branch>`** — necesario si el repo no tiene
+19. **`git remote set-head origin <branch>`** — necesario si el repo no tiene
     un HEAD simbólico configurado (el security-review skill falla sin esto).
 
-17. **PR body con heredoc en MCP** — la interpolación `$(cat <<'EOF'...EOF)` no
-    funciona cuando se pasa como string a herramientas MCP. El PR #1 tiene el body
-    como shell syntax literal. Usar strings planos en futuras PRs.
+20. **PR body con heredoc en MCP** — la interpolación `$(cat <<'EOF'...EOF)` no
+    funciona cuando se pasa como string a herramientas MCP. Usar strings planos.
 
 ---
 
@@ -221,14 +241,12 @@ Siempre validar contra https://github.com/nextcloud para:
 - Atributos disponibles por versión de NC
 - Patrones de código de apps del core (calendar, contacts, etc.)
 
-### Variables de configuración
+### Variables de configuración actuales
 
 ```php
-// Leer límite de URLs (con IAppConfig inyectado como per-app)
-$maxUrls = $this->appConfig->getAppValueInt('max_urls', 3);
-
-// Guardar desde PHP (ej. en un AdminController)
-$this->appConfig->setAppValue('max_urls', (string)$value);
+// Leer desde PHP (IAppConfig inyectado como per-app)
+$maxUrls       = $this->appConfig->getAppValueInt('max_urls', 3);
+$retentionDays = $this->appConfig->getAppValueInt('retention_days', 30);
 
 // Leer desde JS
 import { loadState } from '@nextcloud/initial-state'
@@ -248,26 +266,29 @@ ed1ba9d  Security: fix stored XSS in status panel via unescaped server data
 250b1f4  Simplify: remove dead state, skip re-render when nothing changed, prune terminal jobs
 c360aad  Review fixes: folder type guard, putContent safety, credential sanitization
 1fa9ad7  Phase 2 + Admin Settings: multi-URL dialog with admin-configurable limit
+d28df8c  Add session handoff document
+201156d  Phase 3: restore active/recent jobs on page load
+e720f82  Simplify: extract status helpers, fix panelHidden bug, DRY job pruning
+fb79979  Phase 4: cleanup job, retention setting, and review fixes
+d670a61  Fix: clamp retention_days to minimum 1 in CleanupJob
+13002bb  Simplify: extract validateTransferInput, fix dual-save race, remove dead code
 ```
 
 ---
 
 ## Cosas pendientes / deuda técnica conocida
 
-- [ ] **Fase 3**: Cargar jobs de la última hora al abrir Files (Fase 3)
-- [ ] **Fase 4**: Admin Settings completos (max_size, concurrencia, blocklist, retención)
-- [ ] **TimedJob de limpieza**: `deleteOlderThan()` existe en el mapper pero nunca se llama
-- [ ] **`findByToken()`** en el mapper está sin usar — conectar o eliminar
-- [ ] **`generateFilePath` → `generateUrl`**: el código usa `generateFilePath` para
-  llamadas AJAX, que es técnicamente incorrecto (es para archivos estáticos).
-  Debería ser `generateUrl('/apps/transfer/ajax/...')`. Heredado del código original.
-- [ ] **Tests unitarios**: `isValidRemoteUrl()`, `integrityCheckPasses()`, `sanitizeUrlForLog()`
-- [ ] **Checksum en batch**: actualmente el modo multi-URL no permite checksum.
-  Se podría agregar un campo checksum per-fila en una futura iteración.
-- [ ] **Fase 3 panel init**: al abrir Files, llamar `/ajax/status.php` y poblar
-  `trackedJobs` con jobs activos de las últimas X horas.
-- [ ] El PR #1 tiene el body con shell syntax literal (bug del MCP heredoc).
-  Actualizar el body del PR en GitHub.
+- [ ] **Fase 5 — Notificaciones push**: implementar `INotifier` para que Nextcloud
+  muestre una notificación nativa al completar o fallar una descarga (campana de NC).
+- [ ] **Tests unitarios**: `isValidRemoteUrl()`, `integrityCheckPasses()`,
+  `sanitizeUrlForLog()` — funciones puras, fáciles de testear sin stack de Nextcloud.
+- [ ] **Admin: max_size_mb** — limitar el tamaño máximo de archivo descargable.
+  Requiere leer el header `Content-Length` en `TransferService` y abortar si supera el límite.
+- [ ] **Admin: domain blocklist** — lista de dominios prohibidos configurable por el admin.
+- [ ] **Checksum en batch** — actualmente el modo multi-URL oculta el campo de checksum.
+  Se podría agregar un campo hash por fila en una iteración futura.
+- [ ] **PR #1 body** — el body del PR en GitHub muestra sintaxis de heredoc literal
+  (bug conocido del MCP). Actualizarlo manualmente desde GitHub.
 
 ---
 
