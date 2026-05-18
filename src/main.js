@@ -231,6 +231,10 @@ let panelEl = null
 let pollTimer = null
 let panelHidden = false
 
+function esc(s) {
+	return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
 function getFilename(path) {
 	return path.split('/').filter(Boolean).pop() || path
 }
@@ -276,10 +280,10 @@ function renderPanel() {
 	let itemsHtml = ''
 	for (const [, job] of [...trackedJobs].reverse()) {
 		itemsHtml += `
-			<div class="transfer-panel__item transfer-panel__item--${job.status}">
+			<div class="transfer-panel__item transfer-panel__item--${esc(job.status)}">
 				<span class="transfer-panel__icon">${statusIcon(job.status)}</span>
-				<span class="transfer-panel__name" title="${job.path}">${getFilename(job.path)}</span>
-				<span class="transfer-panel__state">${statusLabel(job.status, job.error)}</span>
+				<span class="transfer-panel__name" title="${esc(job.path)}">${esc(getFilename(job.path))}</span>
+				<span class="transfer-panel__state">${esc(statusLabel(job.status, job.error))}</span>
 			</div>`
 	}
 
