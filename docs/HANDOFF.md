@@ -8,8 +8,7 @@ Pega este archivo como contexto al inicio de la sesión.
 ## Repositorio
 
 - **Fork**: https://github.com/jairodmorales/transfer
-- **Rama de trabajo**: `claude/nextcloud-compatibility-review-Fy6Xe`
-- **PR abierto**: #1 (draft) — rama → master
+- **Rama principal**: `master` (PR #1 mergeado — squash commit `2a05e25`)
 - **App original**: https://github.com/beleon/transfer
 
 ---
@@ -69,7 +68,7 @@ Nextcloud 32/33.
 - **Endpoint batch**: `POST /ajax/batch.php` (transfer#batch)
   - Acepta array de `{url, path, hashAlgo, hash}`
   - Validación atómica (dos pasadas): valida todo antes de insertar nada
-  - Rechaza si `count > max_urls`
+  - Rechaza si `count > max_urls`; `min(10, max(1, ...))` para evitar bypass por config corrupta
   - Devuelve array `{token, path}` por job
 - **Diálogo multi-URL**:
   - Filas dinámicas: URL + filename por fila
@@ -104,9 +103,27 @@ Nextcloud 32/33.
 - Admin `domain_blocklist`: textarea con un dominio por línea, soporta `*.wildcard.com`
   — validado en `validateTransferInput()` y `probe()` via `TransferUtils::isDomainBlocked()`
 
+### ✅ Review fixes (post-skills)
+- `src/main.js close()`: `removeEventListener('keydown', onKey)` para evitar acumulación de listeners
+- `validateTransferInput()`: rechaza `hashAlgo` sin `hash` (simétrico al caso inverso)
+- `batch()`: `min(10, max(1, $maxUrls))` — evita bypass del límite por config corrupta
+- `saveToUserFolder()`: `file->delete()` en fopen failure y putContent exception (evita nodo NC vacío)
+- `TransferJob::run()`: `try/catch(\Throwable)` como guard de último recurso (job no queda en `running`)
+- `templates/admin.php`: elimina `script('transfer','transfer-main')` innecesario en página admin
+
 ### 🔲 Pendiente — Checksum en batch
 - Checksum por fila en modo batch (actualmente el campo se oculta con 2+ URLs)
 - Se deja para una versión futura
+
+---
+
+## Estado del repositorio
+
+- **Versión**: 0.9.0
+- **Branch principal**: `master`
+- **PR #1**: mergeado (squash) el 18 mayo 2026
+- **Unit tests**: `./vendor/bin/phpunit` — 35 tests, 37 assertions, 0 failures
+- **Skills ejecutados**: `/security-review` ✅, `/simplify` ✅, `/review` ✅ (todos los findings corregidos)
 
 ---
 
@@ -121,7 +138,7 @@ transfer/
 │   ├── AppInfo/Application.php           # Bootstrap, registra listener + CleanupJob + Notifier
 │   ├── BackgroundJob/
 │   │   ├── CleanupJob.php                # TimedJob semanal, deleteOlderThan(retention_days)
-│   │   └── TransferJob.php               # QueuedJob, pasa token a service
+│   │   └── TransferJob.php               # QueuedJob, pasa token a service; try/catch(\Throwable)
 │   ├── Controller/TransferController.php # transfer(), status(?since=), probe(), batch()
 │   ├── Db/
 │   │   ├── TransferJobEntity.php         # STATUS_QUEUED/RUNNING/DONE/FAILED
@@ -174,6 +191,8 @@ transfer/
 
 4. **`putContent()` puede lanzar excepciones** (`LockedException`, `NotPermittedException`).
    Envolver en try/catch/finally. El `finally` debe cerrar el stream.
+   Además, `newFile()` crea un nodo vacío en NC ANTES de escribir contenido — si falla
+   la escritura, llamar `$file->delete()` para evitar dejar un archivo de 0 bytes.
 
 5. **Mensajes de excepción de Guzzle pueden contener credenciales** (`user:pass@host`).
    Aplicar `sanitizeErrorMessage()` antes de guardar en DB o logs.
@@ -185,7 +204,8 @@ transfer/
    Disponible desde NC 27.
 
 8. **Validar `hash !== '' && hashAlgo === ''`** — sin esta validación el usuario
-   puede enviar hash sin algo y el check se salta silenciosamente.
+   puede enviar hash sin algo y el check se salta silenciosamente. También validar
+   el caso inverso: `hashAlgo !== '' && hash === ''`.
 
 9. **Validación atómica en operaciones batch**: validar todos los ítems en una primera
    pasada antes de insertar ninguno. Si se mezcla validación con insert, un fallo en
@@ -194,83 +214,149 @@ transfer/
 10. **`TimedJob::setInterval()`** acepta segundos. Usar constantes nombradas
     (`WEEK_IN_SECONDS = 7 * 24 * 3600`) en lugar de literales para legibilidad.
 
+11. **`min(10, max(1, $configValue))`** — siempre clampear valores leídos de config
+    del admin antes de usarlos como límites de seguridad. Un admin malicioso o config
+    corrupta no debe poder saltarse los límites codificados.
+
+12. **`TransferJob::run()` debe tener `try/catch(\Throwable)`** como guard de último
+    recurso. Si `TransferService::transfer()` lanza una excepción inesperada, el job
+    quedaría en estado `running` para siempre sin el catch.
+
 ### Frontend (Vanilla JS)
 
-11. **`innerHTML` + datos del servidor = XSS**. Siempre aplicar `esc()` a cualquier
+13. **`innerHTML` + datos del servidor = XSS**. Siempre aplicar `esc()` a cualquier
     dato de la API antes de interpolar en template literals asignados a `innerHTML`.
 
-12. **`loadState('appId', 'key', default)`** de `@nextcloud/initial-state` para
+14. **`loadState('appId', 'key', default)`** de `@nextcloud/initial-state` para
     leer datos inyectados desde PHP. Requiere `IInitialState::provideInitialState()`
     en el listener PHP.
 
-13. **Re-render del form en cada keystroke destruye el foco**. Separar:
+15. **Re-render del form en cada keystroke destruye el foco**. Separar:
     - `renderDialog()` — reconstrucción completa solo en cambios estructurales
     - Patches puntuales (`input.placeholder`, `btn.disabled`) para cambios de validez
 
-14. **Cada fila del multi-URL necesita su propio `probeTimer`** — si se comparte
+16. **Cada fila del multi-URL necesita su propio `probeTimer`** — si se comparte
     un timer global, los probes de diferentes filas se cancelan entre sí.
 
-15. **`generateUrl('/apps/transfer/ajax/...')`** para rutas de controller.
+17. **`generateUrl('/apps/transfer/ajax/...')`** para rutas de controller.
     `generateFilePath('app', 'type', 'file.php')` es solo para archivos estáticos.
 
-16. **Jobs en `trackedJobs` Map deben purgarse** después de terminal, si no el mapa
+18. **Jobs en `trackedJobs` Map deben purgarse** después de terminal, si no el mapa
     crece indefinidamente y el polling nunca para. Solución: `scheduleJobPrune(token)`.
 
-17. **Doble `OCP.AppConfig.setValue`**: usar un flag `failed` además del contador `saved`
-    para evitar mostrar "Saved" si uno de los dos escrituras falló.
+19. **Doble `OCP.AppConfig.setValue`**: usar un flag `failed` además del contador `saved`
+    para evitar mostrar "Saved" si una de las escrituras falló.
 
-21. **`INotifier::prepare()` debe lanzar `UnknownNotificationException`** (no `\InvalidArgumentException`)
+20. **`document.addEventListener('keydown', onKey)` en diálogos**: siempre llamar
+    `removeEventListener` en `close()`, no solo en el handler del Escape. Si no,
+    cada apertura del diálogo acumula un listener adicional.
+
+21. **`script('transfer', 'transfer-main')`** NO debe incluirse en templates de admin.
+    Solo pertenece en el listener de Files. Incluirlo en admin carga el bundle de
+    usuario innecesariamente.
+
+### Notificaciones
+
+22. **`INotifier::prepare()` debe lanzar `UnknownNotificationException`** (no `\InvalidArgumentException`)
     para subjects no reconocidos. `UnknownNotificationException` está disponible desde NC 26;
     con `min-version=29` es seguro. Registrar via `registerNotifierService()`, no en `info.xml`.
 
-22. **`OCP\Notification\IManager`** — diferente de `OCP\Activity\IManager`. Ambos usan
+23. **`OCP\Notification\IManager`** — diferente de `OCP\Activity\IManager`. Ambos usan
     el alias `IManager` — importar con alias: `use OCP\Notification\IManager as INotificationManager`.
 
-23. **Funciones puras sin dependencias NC** (validación de URL, hashes, sanitización de logs)
-    deben extraerse a una clase estática separada. Razón doble: evita duplicación entre controller/service
-    y permite tests PHPUnit sin el stack completo de Nextcloud.
+### Tests
 
 24. **`hash_file()` emite `E_WARNING` con archivo inexistente** — PHPUnit convierte warnings PHP
     en test warnings. Añadir `is_readable($path)` como guarda previa a la llamada.
 
-25. **`OCP.AppConfig.setValue` con N settings**: usar un array dinámico y comparar
-    `saved < settings.length` en lugar de un literal hardcodeado. Si no, cada vez que se
-    añade un setting hay que actualizar el contador manualmente.
+25. **Funciones puras sin dependencias NC** (validación de URL, hashes, sanitización de logs)
+    deben extraerse a una clase estática separada (`TransferUtils`). Razón doble: evita
+    duplicación entre controller/service y permite tests PHPUnit sin el stack de Nextcloud.
 
 ### Proceso / Skills
 
-18. **Siempre correr los 3 skills de Nextcloud** tras cambios:
-    `/security-review`, `/simplify`, `/review`. Son mandatorios.
+26. **Siempre correr los 3 skills de Nextcloud** tras cambios:
+    `/security-review`, `/simplify`, `/review`. Son mandatorios según instrucción permanente.
 
-19. **`git remote set-head origin <branch>`** — necesario si el repo no tiene
+27. **`git remote set-head origin <branch>`** — necesario si el repo no tiene
     un HEAD simbólico configurado (el security-review skill falla sin esto).
 
-20. **PR body con heredoc en MCP** — la interpolación `$(cat <<'EOF'...EOF)` no
+28. **PR body con heredoc en MCP** — la interpolación `$(cat <<'EOF'...EOF)` no
     funciona cuando se pasa como string a herramientas MCP. Usar strings planos.
 
 ---
 
-## Instrucciones para continuar
+## Cómo probar en Proxmox (LXC + tteck script)
 
-### Setup inicial en desktop
+### 1. Crear el LXC con Nextcloud
 
+Desde la shell del nodo Proxmox:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/tteck/Proxmox/main/ct/nextcloud.sh)"
+```
+
+Acepta los defaults (o ajusta RAM/disco según disponibilidad). Al terminar el script
+muestra la IP del contenedor y las credenciales admin.
+
+### 2. Instalar la app Transfer
+
+```bash
+# Desde la shell del nodo Proxmox, entrar al LXC (ajusta el ID)
+pct enter <ID_LXC>
+
+# Ir al directorio de apps
+cd /var/www/nextcloud/custom_apps
+
+# Clonar el repositorio
+git clone https://github.com/jairodmorales/transfer.git transfer
+
+# Activar la app y correr la migración
+sudo -u www-data php /var/www/nextcloud/occ app:enable transfer
+sudo -u www-data php /var/www/nextcloud/occ migrations:migrate transfer
+```
+
+### 3. Verificar
+
+```bash
+sudo -u www-data php /var/www/nextcloud/occ app:list | grep transfer
+# → transfer: 0.9.0
+```
+
+Luego abrir Nextcloud en el navegador → Files → `+` → "Upload by link".
+
+### Checklist de pruebas manuales
+
+- [ ] Descarga básica: URL pública → verifica archivo en carpeta + panel de estado
+- [ ] Multi-URL: 2–3 filas, probe independiente, submit batch
+- [ ] Notificación bell: completar una descarga → campana NC
+- [ ] Restore tras refresh: iniciar descarga, recargar página → panel restaura job
+- [ ] Admin `max_size_mb=1`: descargar archivo >1 MB → fallo con mensaje claro
+- [ ] Admin `domain_blocklist`: agregar dominio, intentar descarga → rechazado
+- [ ] Unit tests: `./vendor/bin/phpunit` (desde raíz del repo, sin NC)
+
+---
+
+## Instrucciones para continuar en nueva sesión
+
+### Setup
 ```bash
 git clone https://github.com/jairodmorales/transfer
 cd transfer
-git checkout claude/nextcloud-compatibility-review-Fy6Xe
+git checkout master
 npm install
 npm run build
+composer install  # solo para tests
 ```
 
-### Antes de cualquier cambio — verificar skills disponibles
-
-Los skills de Nextcloud son obligatorios. Siempre ejecutar después de cambios:
-- `/security-review` — vulnerabilidades de seguridad
-- `/simplify` — calidad, reuso, eficiencia
-- `/review` — revisión general del PR
+### Antes de cualquier cambio
+```bash
+# Verificar que los 3 skills están disponibles
+# Ejecutar SIEMPRE después de cambios:
+# /security-review → /simplify → /review
+```
 
 ### Regla de oro: validar con Nextcloud oficial
-
 Siempre validar contra https://github.com/nextcloud para:
 - Versiones de interfaces OCP
 - Atributos disponibles por versión de NC
@@ -280,13 +366,16 @@ Siempre validar contra https://github.com/nextcloud para:
 
 ```php
 // Leer desde PHP (IAppConfig inyectado como per-app)
-$maxUrls        = $this->appConfig->getAppValueInt('max_urls', 3);
-$retentionDays  = $this->appConfig->getAppValueInt('retention_days', 30);
-$maxSizeMb      = $this->appConfig->getAppValueInt('max_size_mb', 0);   // 0 = sin límite
+$maxUrls         = $this->appConfig->getAppValueInt('max_urls', 3);
+$retentionDays   = $this->appConfig->getAppValueInt('retention_days', 30);
+$maxSizeMb       = $this->appConfig->getAppValueInt('max_size_mb', 0);   // 0 = sin límite
 $domainBlocklist = $this->appConfig->getAppValueString('domain_blocklist', '');
 
-// Parsear la blocklist (string newline-delimitado → array)
-$blocklist = array_values(array_filter(array_map('trim', explode("\n", $domainBlocklist))));
+// Parsear la blocklist (string newline-delimitado → array normalizado)
+$blocklist = array_values(array_filter(array_map(
+    static fn(string $e): string => strtolower(trim($e)),
+    explode("\n", $domainBlocklist)
+)));
 
 // Leer desde JS
 import { loadState } from '@nextcloud/initial-state'
@@ -295,48 +384,11 @@ const maxUrls = loadState('transfer', 'maxUrls', 3)
 
 ---
 
-## Commits en la rama (orden cronológico)
-
-```
-96f1aca  Fix download failures and add Nextcloud 32/33 compatibility
-28ca94d  Security hardening (Phase 0)
-4be671a  Simplify: unify activity events, add types, fix probeTimer leak
-6648bf2  Phase 1: async job tracking, floating status panel, token-based polling
-ed1ba9d  Security: fix stored XSS in status panel via unescaped server data
-250b1f4  Simplify: remove dead state, skip re-render when nothing changed, prune terminal jobs
-c360aad  Review fixes: folder type guard, putContent safety, credential sanitization
-1fa9ad7  Phase 2 + Admin Settings: multi-URL dialog with admin-configurable limit
-d28df8c  Add session handoff document
-201156d  Phase 3: restore active/recent jobs on page load
-e720f82  Simplify: extract status helpers, fix panelHidden bug, DRY job pruning
-fb79979  Phase 4: cleanup job, retention setting, and review fixes
-d670a61  Fix: clamp retention_days to minimum 1 in CleanupJob
-13002bb  Simplify: extract validateTransferInput, fix dual-save race, remove dead code
-7b121f3  Update HANDOFF.md: mark phases 0-4 complete, add Phase 5 and lessons 9-20
-c4dbf54  Refactor: extract TransferUtils with pure-function utilities
-4682abd  Phase 5a: INotifier — native Nextcloud push notifications
-63c97ad  Phase 5b: Admin settings — max file size and domain blocklist
-dcacc0f  Tests: add PHPUnit suite for TransferUtils (35 tests, 37 assertions)
-84c2057  Bump version to 0.9.0
-```
-
----
-
-## Cosas pendientes / deuda técnica conocida
-
-- [ ] **Checksum en batch** — el campo de checksum se oculta en modo multi-URL.
-  Se podría agregar un campo hash por fila en una versión futura (dejado explícitamente).
-
-- [ ] **Skills obligatorios pendientes para Fase 5**: ejecutar `/security-review`,
-  `/simplify` y `/review` sobre los commits de Phase 5 antes de mergear el PR.
-
----
-
 ## Recursos
 
 - **Nextcloud OCP API docs**: https://docs.nextcloud.com/server/latest/developer_manual/
 - **Repositorio oficial NC**: https://github.com/nextcloud/server
 - **Ejemplos de apps NC**: https://github.com/nextcloud/news, https://github.com/nextcloud/calendar
-- **Guía de migración NC 32**: https://docs.nextcloud.com/server/latest/developer_manual/app_publishing_maintenance/upgrade.html
 - **@nextcloud/initial-state**: https://github.com/nextcloud/nextcloud-initial-state
 - **Vite config para NC**: https://github.com/nextcloud/nextcloud-vite-config
+- **tteck Proxmox scripts**: https://tteck.github.io/Proxmox/
