@@ -27,7 +27,10 @@ class CleanupJob extends TimedJob {
 	}
 
 	protected function run($argument): void {
-		$retentionDays = $this->appConfig->getAppValueInt('retention_days', 30);
+		// Clamp to a minimum of 1 day so a misconfigured value of 0 or
+		// a negative integer cannot produce a future cutoff that wipes
+		// active and recent job rows.
+		$retentionDays = max(1, $this->appConfig->getAppValueInt('retention_days', 30));
 		$cutoff = time() - ($retentionDays * 86400);
 		$this->mapper->deleteOlderThan($cutoff);
 	}
