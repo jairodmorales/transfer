@@ -94,11 +94,19 @@ Nextcloud 32/33.
 - `validateTransferInput()` extrae la lógica de validación duplicada entre `transfer()` y `batch()`
 - `generateFilePath` → `generateUrl` corregido en todas las llamadas AJAX del JS
 
-### 🔲 Fase 5 — Notificaciones push + Tests + Admin avanzado
-- `INotifier` para notificaciones push nativas de Nextcloud al completar/fallar
-- Tests unitarios: `isValidRemoteUrl()`, `integrityCheckPasses()`, `sanitizeUrlForLog()`
-- Admin settings adicionales: `max_size_mb`, blocklist de dominios
-- Checksum por fila en modo batch (actualmente se oculta con 2+ URLs)
+### ✅ Fase 5 — Notificaciones push + Tests + Admin avanzado
+- `INotifier` (`lib/Notification/Notifier.php`) — notificación nativa en campana NC al completar/fallar
+- Registrado via `registerNotifierService()` en `Application.php`
+- `TransferUtils` — clase estática con funciones puras extraídas de controller y service
+- Tests unitarios PHPUnit 10: 35 tests / 37 assertions — `isValidRemoteUrl`, `isDomainBlocked`,
+  `integrityCheckPasses`, `sanitizeUrlForLog`, `sanitizeErrorMessage`
+- Admin `max_size_mb` (default 0 = sin límite): chequeo de filesize tras descarga a temp
+- Admin `domain_blocklist`: textarea con un dominio por línea, soporta `*.wildcard.com`
+  — validado en `validateTransferInput()` y `probe()` via `TransferUtils::isDomainBlocked()`
+
+### 🔲 Pendiente — Checksum en batch
+- Checksum por fila en modo batch (actualmente el campo se oculta con 2+ URLs)
+- Se deja para una versión futura
 
 ---
 
@@ -107,25 +115,34 @@ Nextcloud 32/33.
 ```
 transfer/
 ├── appinfo/
-│   ├── info.xml                          # version=0.8.0, min-version=29, max-version=33
+│   ├── info.xml                          # version=0.9.0, min-version=29, max-version=33
 │   └── routes.php                        # transfer, status, probe, batch
 ├── lib/
-│   ├── AppInfo/Application.php           # Bootstrap, registra listener + CleanupJob
+│   ├── AppInfo/Application.php           # Bootstrap, registra listener + CleanupJob + Notifier
 │   ├── BackgroundJob/
 │   │   ├── CleanupJob.php                # TimedJob semanal, deleteOlderThan(retention_days)
-│   │   └── TransferJob.php              # QueuedJob, pasa token a service
+│   │   └── TransferJob.php               # QueuedJob, pasa token a service
 │   ├── Controller/TransferController.php # transfer(), status(?since=), probe(), batch()
 │   ├── Db/
 │   │   ├── TransferJobEntity.php         # STATUS_QUEUED/RUNNING/DONE/FAILED
 │   │   └── TransferJobMapper.php         # findRecentByUser, updateStatus, deleteOlderThan
 │   ├── Listeners/
-│   │   └── LoadAdditionalScriptsListener.php  # Inyecta maxUrls + retentionDays initial state
+│   │   └── LoadAdditionalScriptsListener.php  # Inyecta maxUrls via IInitialState
 │   ├── Migration/
 │   │   └── Version0800Date20260518000000.php  # Crea tabla transfer_jobs
-│   ├── Service/TransferService.php       # Descarga, verifica hash, guarda en FS
-│   └── Settings/Admin.php               # ISettings para panel de admin
+│   ├── Notification/
+│   │   └── Notifier.php                  # INotifier: SUBJECT_DONE / SUBJECT_FAILED
+│   ├── Service/
+│   │   ├── TransferService.php           # Descarga, verifica hash, guarda en FS, envía notifs
+│   │   └── TransferUtils.php             # Funciones puras: isValidRemoteUrl, isDomainBlocked, etc.
+│   └── Settings/Admin.php               # ISettings: max_urls, retention_days, max_size_mb, domain_blocklist
 ├── src/main.js                           # Dialog multi-URL + panel de estado
-├── templates/admin.php                   # Formulario admin settings
+├── templates/admin.php                   # Formulario admin settings (4 campos)
+├── tests/
+│   ├── bootstrap.php
+│   └── Unit/Service/TransferUtilsTest.php  # 35 tests PHPUnit 10
+├── composer.json                         # phpunit/phpunit ^10.5 dev dep
+├── phpunit.xml
 └── docs/HANDOFF.md                       # Este archivo (.gitignore local)
 ```
 
@@ -202,6 +219,24 @@ transfer/
 17. **Doble `OCP.AppConfig.setValue`**: usar un flag `failed` además del contador `saved`
     para evitar mostrar "Saved" si uno de los dos escrituras falló.
 
+21. **`INotifier::prepare()` debe lanzar `UnknownNotificationException`** (no `\InvalidArgumentException`)
+    para subjects no reconocidos. `UnknownNotificationException` está disponible desde NC 26;
+    con `min-version=29` es seguro. Registrar via `registerNotifierService()`, no en `info.xml`.
+
+22. **`OCP\Notification\IManager`** — diferente de `OCP\Activity\IManager`. Ambos usan
+    el alias `IManager` — importar con alias: `use OCP\Notification\IManager as INotificationManager`.
+
+23. **Funciones puras sin dependencias NC** (validación de URL, hashes, sanitización de logs)
+    deben extraerse a una clase estática separada. Razón doble: evita duplicación entre controller/service
+    y permite tests PHPUnit sin el stack completo de Nextcloud.
+
+24. **`hash_file()` emite `E_WARNING` con archivo inexistente** — PHPUnit convierte warnings PHP
+    en test warnings. Añadir `is_readable($path)` como guarda previa a la llamada.
+
+25. **`OCP.AppConfig.setValue` con N settings**: usar un array dinámico y comparar
+    `saved < settings.length` en lugar de un literal hardcodeado. Si no, cada vez que se
+    añade un setting hay que actualizar el contador manualmente.
+
 ### Proceso / Skills
 
 18. **Siempre correr los 3 skills de Nextcloud** tras cambios:
@@ -245,8 +280,13 @@ Siempre validar contra https://github.com/nextcloud para:
 
 ```php
 // Leer desde PHP (IAppConfig inyectado como per-app)
-$maxUrls       = $this->appConfig->getAppValueInt('max_urls', 3);
-$retentionDays = $this->appConfig->getAppValueInt('retention_days', 30);
+$maxUrls        = $this->appConfig->getAppValueInt('max_urls', 3);
+$retentionDays  = $this->appConfig->getAppValueInt('retention_days', 30);
+$maxSizeMb      = $this->appConfig->getAppValueInt('max_size_mb', 0);   // 0 = sin límite
+$domainBlocklist = $this->appConfig->getAppValueString('domain_blocklist', '');
+
+// Parsear la blocklist (string newline-delimitado → array)
+$blocklist = array_values(array_filter(array_map('trim', explode("\n", $domainBlocklist))));
 
 // Leer desde JS
 import { loadState } from '@nextcloud/initial-state'
@@ -272,23 +312,23 @@ e720f82  Simplify: extract status helpers, fix panelHidden bug, DRY job pruning
 fb79979  Phase 4: cleanup job, retention setting, and review fixes
 d670a61  Fix: clamp retention_days to minimum 1 in CleanupJob
 13002bb  Simplify: extract validateTransferInput, fix dual-save race, remove dead code
+7b121f3  Update HANDOFF.md: mark phases 0-4 complete, add Phase 5 and lessons 9-20
+c4dbf54  Refactor: extract TransferUtils with pure-function utilities
+4682abd  Phase 5a: INotifier — native Nextcloud push notifications
+63c97ad  Phase 5b: Admin settings — max file size and domain blocklist
+dcacc0f  Tests: add PHPUnit suite for TransferUtils (35 tests, 37 assertions)
+84c2057  Bump version to 0.9.0
 ```
 
 ---
 
 ## Cosas pendientes / deuda técnica conocida
 
-- [ ] **Fase 5 — Notificaciones push**: implementar `INotifier` para que Nextcloud
-  muestre una notificación nativa al completar o fallar una descarga (campana de NC).
-- [ ] **Tests unitarios**: `isValidRemoteUrl()`, `integrityCheckPasses()`,
-  `sanitizeUrlForLog()` — funciones puras, fáciles de testear sin stack de Nextcloud.
-- [ ] **Admin: max_size_mb** — limitar el tamaño máximo de archivo descargable.
-  Requiere leer el header `Content-Length` en `TransferService` y abortar si supera el límite.
-- [ ] **Admin: domain blocklist** — lista de dominios prohibidos configurable por el admin.
-- [ ] **Checksum en batch** — actualmente el modo multi-URL oculta el campo de checksum.
-  Se podría agregar un campo hash por fila en una iteración futura.
-- [ ] **PR #1 body** — el body del PR en GitHub muestra sintaxis de heredoc literal
-  (bug conocido del MCP). Actualizarlo manualmente desde GitHub.
+- [ ] **Checksum en batch** — el campo de checksum se oculta en modo multi-URL.
+  Se podría agregar un campo hash por fila en una versión futura (dejado explícitamente).
+
+- [ ] **Skills obligatorios pendientes para Fase 5**: ejecutar `/security-review`,
+  `/simplify` y `/review` sobre los commits de Phase 5 antes de mergear el PR.
 
 ---
 
