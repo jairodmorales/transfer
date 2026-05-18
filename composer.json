@@ -1,0 +1,21 @@
+{
+	"name": "beleon/transfer",
+	"description": "Upload by link for Nextcloud",
+	"license": "AGPL-3.0-or-later",
+	"autoload": {
+		"psr-4": {
+			"OCA\\Transfer\\": "lib/"
+		}
+	},
+	"autoload-dev": {
+		"psr-4": {
+			"OCA\\Transfer\\Tests\\": "tests/"
+		}
+	},
+	"require-dev": {
+		"phpunit/phpunit": "^10.5"
+	},
+	"config": {
+		"optimize-autoloader": true
+	}
+}
