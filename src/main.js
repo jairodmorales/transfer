@@ -703,3 +703,51 @@ addNewFileMenuEntry({
 		showDialog(context.path || '/')
 	},
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel initialization — restore active/recent jobs on page load
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * On page load, fetch the user's recent jobs and pre-populate the panel.
+ *
+ * - Active jobs (queued/running): tracked and polled until they complete,
+ *   covering transfers started in another tab or before a page refresh.
+ * - Terminal jobs from the last hour (done/failed): shown briefly so the
+ *   user sees recent history, then auto-removed after 30 s (same as the
+ *   poll-based pruning path).
+ * - Older terminal jobs: ignored — they are history, not actionable.
+ *
+ * Failures are silently swallowed; the panel simply starts empty.
+ */
+async function initPanel() {
+	try {
+		const resp = await axios.get(generateFilePath('transfer', 'ajax', 'status.php'))
+		const oneHourAgo = Math.floor(Date.now() / 1000) - 3600
+
+		for (const job of resp.data) {
+			const isActive = job.status === 'queued' || job.status === 'running'
+			const isRecentTerminal = (job.status === 'done' || job.status === 'failed')
+				&& job.createdAt >= oneHourAgo
+
+			if (!isActive && !isRecentTerminal) continue
+
+			trackedJobs.set(job.token, {
+				path:   job.path,
+				status: job.status,
+				error:  job.error,
+			})
+
+			if (isRecentTerminal) {
+				setTimeout(() => trackedJobs.delete(job.token), 30000)
+			}
+		}
+
+		if (trackedJobs.size > 0) renderPanel()
+		scheduleNextPoll()
+	} catch {
+		// Silently ignore — panel starts empty if the request fails
+	}
+}
+
+initPanel()
