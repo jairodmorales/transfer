@@ -12,23 +12,27 @@ use OCP\Files\NotFoundException;
 use OCP\Http\Client\IClientService;
 use OCP\Http\Client\LocalServerException;
 use OCP\ITempManager;
+use Psr\Log\LoggerInterface;
 
 class TransferService {
 	protected $activityManager;
 	protected $clientService;
 	protected $rootFolder;
 	protected $tempManager;
+	protected $logger;
 
 	public function __construct(
 		IManager $activityManager,
 		IClientService $clientService,
 		IRootFolder $rootFolder,
-		ITempManager $tempManager
+		ITempManager $tempManager,
+		LoggerInterface $logger
 	) {
 		$this->activityManager = $activityManager;
 		$this->clientService = $clientService;
 		$this->rootFolder = $rootFolder;
 		$this->tempManager = $tempManager;
+		$this->logger = $logger;
 	}
 
 	/**
@@ -44,12 +48,44 @@ class TransferService {
 		$client = $this->clientService->newClient();
 
 		try {
-			$response = $client->get($url, ["sink" => $tmpPath, "timeout" => 0]);
+			$client->get($url, [
+				"sink" => $tmpPath,
+				"timeout" => 0,
+				"connect_timeout" => 30,
+				"allow_redirects" => ["max" => 10, "strict" => false, "track_redirects" => false],
+				"headers" => [
+					"User-Agent" => "Mozilla/5.0 (compatible; Nextcloud)",
+					"Accept" => "*/*",
+					"Accept-Language" => "en-US,en;q=0.9",
+				],
+			]);
 		} catch (BadResponseException $exception) {
+			$this->logger->warning('Transfer failed with HTTP error for URL {url}: {message}', [
+				'url' => $url,
+				'message' => $exception->getMessage(),
+				'app' => 'transfer',
+			]);
+			if (file_exists($tmpPath)) {
+				unlink($tmpPath);
+			}
 			$this->generateFailedEvent($userId, $path, $url);
 			return false;
 		} catch (LocalServerException $exception) {
+			if (file_exists($tmpPath)) {
+				unlink($tmpPath);
+			}
 			$this->generateBlockedEvent($userId, $path, $url);
+			return false;
+		} catch (\Exception $exception) {
+			$this->logger->warning('Transfer failed with network error for URL {url}: {message}', [
+				'url' => $url,
+				'message' => $exception->getMessage(),
+				'app' => 'transfer',
+			]);
+			if (file_exists($tmpPath)) {
+				unlink($tmpPath);
+			}
+			$this->generateFailedEvent($userId, $path, $url);
 			return false;
 		}
 
