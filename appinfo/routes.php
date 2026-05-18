@@ -17,5 +17,10 @@ return [
 			'url'  => 'ajax/probe.php',
 			'verb' => 'GET',
 		],
+		[
+			'name' => 'transfer#batch',
+			'url'  => 'ajax/batch.php',
+			'verb' => 'POST',
+		],
 	],
 ];

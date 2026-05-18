@@ -1,4 +1,5 @@
 import { addNewFileMenuEntry, Permission } from '@nextcloud/files'
+import { loadState } from '@nextcloud/initial-state'
 import { translate as t } from '@nextcloud/l10n'
 import { generateFilePath } from '@nextcloud/router'
 import axios from '@nextcloud/axios'
@@ -125,6 +126,58 @@ const STYLES = `
 	width: 20px;
 	height: 20px;
 	fill: currentColor;
+}
+
+/* ── Multi-URL rows ────────────────────────────────────────────────────────── */
+.transfer-url-rows {
+	display: flex;
+	flex-direction: column;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+}
+.transfer-url-row {
+	display: flex;
+	align-items: flex-end;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+}
+.transfer-url-row__num {
+	flex-shrink: 0;
+	width: 1.4em;
+	text-align: right;
+	font-size: 0.85em;
+	color: var(--color-text-maxcontrast, #767676);
+	padding-bottom: 10px;
+}
+.transfer-url-row__inputs {
+	flex: 1;
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+	min-width: 0;
+}
+@media (max-width: 460px) {
+	.transfer-url-row__inputs { grid-template-columns: 1fr; }
+}
+.transfer-url-row__remove {
+	flex-shrink: 0;
+	background: none;
+	border: none;
+	cursor: pointer;
+	padding: 6px;
+	color: var(--color-text-maxcontrast, #767676);
+	border-radius: var(--border-radius, 4px);
+	font-size: 1.1em;
+	line-height: 1;
+	align-self: flex-end;
+	margin-bottom: 4px;
+}
+.transfer-url-row__remove:hover { color: var(--color-error, #e9322d); }
+.transfer-url-row__remove:disabled { opacity: 0; pointer-events: none; }
+.transfer-add-url {
+	align-self: flex-start;
+	font-size: 0.875em;
+}
+.transfer-dialog--wide {
+	width: 600px;
 }
 
 /* ── Floating status panel ─────────────────────────────────────────────────── */
@@ -358,31 +411,21 @@ function parseFilename(url) {
 	}
 }
 
-let probeTimer = null
-
-function probeExtension(url, callback) {
-	clearTimeout(probeTimer)
-	probeTimer = setTimeout(async () => {
-		try {
-			const resp = await axios.get(
-				generateFilePath('transfer', 'ajax', 'probe.php'),
-				{ params: { url } },
-			)
-			callback(resp.data.extension || '')
-		} catch {
-			callback('')
-		}
-	}, 500)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Upload dialog
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Admin-configured maximum number of URLs per dialog (default 3, max 10).
+const MAX_URLS = loadState('transfer', 'maxUrls', 3)
 
 function showDialog(currentPath) {
 	injectStyles()
 
 	return new Promise((resolve) => {
+		// Each row holds its own state so probe timers and edited flags
+		// are isolated per URL.
+		const rows = [{ url: '', filename: '', probedExt: '', filenameEdited: false, probeTimer: null }]
+
 		const overlay = document.createElement('div')
 		overlay.className = 'transfer-overlay'
 
@@ -391,115 +434,209 @@ function showDialog(currentPath) {
 		dialog.setAttribute('role', 'dialog')
 		dialog.setAttribute('aria-modal', 'true')
 
-		dialog.innerHTML = `
-			<h2>${t('transfer', 'Upload by link')}</h2>
-			<div class="transfer-dialog__form">
-				<div class="transfer-field">
-					<label for="transfer-url">${t('transfer', 'Link')}</label>
-					<input id="transfer-url" type="url" placeholder="https://example.com/file.txt" />
-				</div>
-
-				<div class="transfer-field">
-					<label for="transfer-filename">${t('transfer', 'File name')}</label>
-					<input id="transfer-filename" type="text" />
-				</div>
-
-				<div class="transfer-note">
-					<p>${t('transfer', 'Some websites provide a checksum in addition to the file. This is used after the transfer to verify that the file is not corrupted.')}</p>
-				</div>
-
-				<div class="transfer-field transfer-field--row">
-					<div class="transfer-field transfer-field--ext">
-						<label for="transfer-hashalgo">${t('transfer', 'Algorithm')}</label>
-						<select id="transfer-hashalgo">
-							<option value="">—</option>
-							<option value="md5">md5</option>
-							<option value="sha1">sha1</option>
-							<option value="sha256">sha256</option>
-							<option value="sha512">sha512</option>
-						</select>
-					</div>
-					<div class="transfer-field transfer-field--grow">
-						<label for="transfer-hash">${t('transfer', 'Checksum')}</label>
-						<input id="transfer-hash" type="text" />
-					</div>
-				</div>
-
-				<div class="transfer-actions">
-					<button id="transfer-cancel" class="transfer-btn">${t('transfer', 'Cancel')}</button>
-					<button id="transfer-submit" class="transfer-btn transfer-btn--primary" disabled>
-						${CLOUD_UPLOAD_SVG}
-						${t('transfer', 'Upload')}
-					</button>
-				</div>
-			</div>
-		`
-
 		overlay.appendChild(dialog)
 		document.body.appendChild(overlay)
 
-		const urlInput = dialog.querySelector('#transfer-url')
-		const filenameInput = dialog.querySelector('#transfer-filename')
-		const hashAlgoSelect = dialog.querySelector('#transfer-hashalgo')
-		const hashInput = dialog.querySelector('#transfer-hash')
-		const submitBtn = dialog.querySelector('#transfer-submit')
-		const cancelBtn = dialog.querySelector('#transfer-cancel')
-
-		let filenameEdited = false
-		let probedExtension = ''
-
-		function updateDefaults() {
-			const parsed = parseFilename(urlInput.value)
-			if (!filenameEdited) {
-				if (parsed.hasExtension) {
-					filenameInput.placeholder = parsed.filename
-				} else if (parsed.filename) {
-					filenameInput.placeholder = parsed.filename
-					probeExtension(urlInput.value, (ext) => {
-						probedExtension = ext
-						if (!filenameEdited && ext) {
-							filenameInput.placeholder = parsed.filename + '.' + ext
-						}
-					})
-				} else {
-					filenameInput.placeholder = t('transfer', 'File name')
-				}
-			}
-			updateValidity()
-		}
-
-		function getFilenameFromInput() {
-			if (filenameInput.value) return filenameInput.value
-			const parsed = parseFilename(urlInput.value)
+		// Returns the effective filename for a row (typed > URL-derived+probed).
+		function getRowFilename(row) {
+			if (row.filename) return row.filename
+			const parsed = parseFilename(row.url)
 			if (parsed.hasExtension) return parsed.filename
-			if (parsed.filename && probedExtension) return parsed.filename + '.' + probedExtension
+			if (parsed.filename && row.probedExt) return parsed.filename + '.' + row.probedExt
 			return parsed.filename
 		}
 
-		function updateValidity() {
-			let validUrl = false
-			try {
-				new URL(urlInput.value)
-				validUrl = true
-			} catch { /* invalid */ }
-			submitBtn.disabled = !(validUrl && getFilenameFromInput())
+		function isRowValid(row) {
+			try { new URL(row.url) } catch { return false }
+			return !!getRowFilename(row)
 		}
 
-		urlInput.addEventListener('input', updateDefaults)
-		filenameInput.addEventListener('input', () => {
-			filenameEdited = filenameInput.value !== ''
-			updateValidity()
-		})
+		function getFilenamePlaceholder(row) {
+			const parsed = parseFilename(row.url)
+			if (parsed.hasExtension) return parsed.filename
+			if (parsed.filename && row.probedExt) return parsed.filename + '.' + row.probedExt
+			return t('transfer', 'File name')
+		}
+
+		// Full DOM rebuild — called at init and whenever rows are added/removed.
+		// Input events patch specific elements instead to preserve focus.
+		function renderDialog() {
+			const allValid = rows.length > 0 && rows.every(isRowValid)
+			const single = rows.length === 1
+			const dir = currentPath.replace(/\/$/, '')
+
+			dialog.className = 'transfer-dialog' + (single ? '' : ' transfer-dialog--wide')
+
+			dialog.innerHTML = `
+				<h2>${t('transfer', 'Upload by link')}</h2>
+				<div class="transfer-dialog__form">
+					<div class="transfer-url-rows" id="transfer-url-rows">
+						${rows.map((row, i) => `
+							<div class="transfer-url-row" data-index="${i}">
+								${!single ? `<span class="transfer-url-row__num">${i + 1}.</span>` : ''}
+								<div class="transfer-url-row__inputs">
+									<div class="transfer-field">
+										${i === 0 ? `<label>${t('transfer', 'Link')}</label>` : ''}
+										<input
+											class="transfer-row-url"
+											type="url"
+											placeholder="https://example.com/file.txt"
+											value="${esc(row.url)}"
+											data-row="${i}"
+										/>
+									</div>
+									<div class="transfer-field">
+										${i === 0 ? `<label>${t('transfer', 'File name')}</label>` : ''}
+										<input
+											class="transfer-row-filename"
+											type="text"
+											placeholder="${esc(getFilenamePlaceholder(row))}"
+											value="${esc(row.filename)}"
+											data-row="${i}"
+										/>
+									</div>
+								</div>
+								<button
+									class="transfer-url-row__remove"
+									title="${t('transfer', 'Remove')}"
+									data-row="${i}"
+									${single ? 'disabled' : ''}
+								>✕</button>
+							</div>
+						`).join('')}
+					</div>
+
+					${rows.length < MAX_URLS ? `
+						<button id="transfer-add-url" class="transfer-btn transfer-add-url">
+							+ ${t('transfer', 'Add URL')}
+						</button>
+					` : ''}
+
+					${single ? `
+						<div class="transfer-note">
+							<p>${t('transfer', 'Some websites provide a checksum in addition to the file. This is used after the transfer to verify that the file is not corrupted.')}</p>
+						</div>
+						<div class="transfer-field transfer-field--row">
+							<div class="transfer-field transfer-field--ext">
+								<label for="transfer-hashalgo">${t('transfer', 'Algorithm')}</label>
+								<select id="transfer-hashalgo">
+									<option value="">—</option>
+									<option value="md5">md5</option>
+									<option value="sha1">sha1</option>
+									<option value="sha256">sha256</option>
+									<option value="sha512">sha512</option>
+								</select>
+							</div>
+							<div class="transfer-field transfer-field--grow">
+								<label for="transfer-hash">${t('transfer', 'Checksum')}</label>
+								<input id="transfer-hash" type="text" />
+							</div>
+						</div>
+					` : ''}
+
+					<div class="transfer-actions">
+						<button id="transfer-cancel" class="transfer-btn">${t('transfer', 'Cancel')}</button>
+						<button id="transfer-submit" class="transfer-btn transfer-btn--primary" ${!allValid ? 'disabled' : ''}>
+							${CLOUD_UPLOAD_SVG}
+							${single
+								? t('transfer', 'Upload')
+								: t('transfer', 'Upload {n} files', { n: rows.length })}
+						</button>
+					</div>
+				</div>
+			`
+
+			bindRowEvents()
+		}
+
+		function bindRowEvents() {
+			// Add-URL button
+			dialog.querySelector('#transfer-add-url')?.addEventListener('click', () => {
+				rows.push({ url: '', filename: '', probedExt: '', filenameEdited: false, probeTimer: null })
+				renderDialog()
+				dialog.querySelectorAll('.transfer-row-url')[rows.length - 1]?.focus()
+			})
+
+			// Remove buttons
+			dialog.querySelectorAll('.transfer-url-row__remove').forEach((btn) => {
+				btn.addEventListener('click', () => {
+					const i = parseInt(btn.dataset.row, 10)
+					clearTimeout(rows[i]?.probeTimer)
+					rows.splice(i, 1)
+					renderDialog()
+				})
+			})
+
+			// URL inputs — update state; patch placeholder; do NOT re-render
+			dialog.querySelectorAll('.transfer-row-url').forEach((input) => {
+				input.addEventListener('input', () => {
+					const i = parseInt(input.dataset.row, 10)
+					rows[i].url = input.value
+
+					if (!rows[i].filenameEdited) {
+						const parsed = parseFilename(rows[i].url)
+						rows[i].probedExt = ''
+						updateRowPlaceholder(i)
+
+						if (!parsed.hasExtension && parsed.filename) {
+							clearTimeout(rows[i].probeTimer)
+							rows[i].probeTimer = setTimeout(async () => {
+								try {
+									const resp = await axios.get(
+										generateFilePath('transfer', 'ajax', 'probe.php'),
+										{ params: { url: rows[i].url } },
+									)
+									rows[i].probedExt = resp.data.extension || ''
+									updateRowPlaceholder(i)
+								} catch { /* ignore */ }
+								updateSubmitBtn()
+							}, 500)
+						}
+					}
+					updateSubmitBtn()
+				})
+			})
+
+			// Filename inputs — update state without re-render
+			dialog.querySelectorAll('.transfer-row-filename').forEach((input) => {
+				input.addEventListener('input', () => {
+					const i = parseInt(input.dataset.row, 10)
+					rows[i].filename = input.value
+					rows[i].filenameEdited = input.value !== ''
+					updateSubmitBtn()
+				})
+			})
+
+			dialog.querySelector('#transfer-cancel')?.addEventListener('click', close)
+
+			dialog.querySelector('#transfer-submit')?.addEventListener('click', submit)
+
+			dialog.addEventListener('keydown', (e) => {
+				const submitBtn = dialog.querySelector('#transfer-submit')
+				if (e.key === 'Enter' && submitBtn && !submitBtn.disabled) {
+					e.preventDefault()
+					submit()
+				}
+			})
+		}
+
+		// Patch just the filename placeholder without rebuilding the form.
+		function updateRowPlaceholder(i) {
+			const inputs = dialog.querySelectorAll('.transfer-row-filename')
+			if (inputs[i]) inputs[i].placeholder = getFilenamePlaceholder(rows[i])
+		}
+
+		function updateSubmitBtn() {
+			const btn = dialog.querySelector('#transfer-submit')
+			if (btn) btn.disabled = !rows.every(isRowValid)
+		}
 
 		function close() {
-			// Cancel any pending probe to avoid a stale callback firing after the
-			// dialog has been removed from the DOM.
-			clearTimeout(probeTimer)
+			rows.forEach(row => clearTimeout(row.probeTimer))
 			overlay.remove()
 			resolve()
 		}
 
-		cancelBtn.addEventListener('click', close)
 		overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
 
 		function onKey(e) {
@@ -511,44 +648,44 @@ function showDialog(currentPath) {
 		document.addEventListener('keydown', onKey)
 
 		async function submit() {
-			const filename = getFilenameFromInput()
-			const path = currentPath.replace(/\/$/, '') + '/' + filename
+			const submitBtn = dialog.querySelector('#transfer-submit')
+			const cancelBtn = dialog.querySelector('#transfer-cancel')
+			if (submitBtn) submitBtn.disabled = true
+			if (cancelBtn) cancelBtn.disabled = true
 
-			submitBtn.disabled = true
-			cancelBtn.disabled = true
+			const hashAlgo = dialog.querySelector('#transfer-hashalgo')?.value ?? ''
+			const hash = dialog.querySelector('#transfer-hash')?.value ?? ''
+			const dir = currentPath.replace(/\/$/, '')
+			const single = rows.length === 1
+
+			const transfers = rows.map(row => ({
+				url:      row.url,
+				path:     dir + '/' + getRowFilename(row),
+				hashAlgo: single ? hashAlgo : '',
+				hash:     single ? hash     : '',
+			}))
 
 			try {
 				const resp = await axios.post(
-					generateFilePath('transfer', 'ajax', 'transfer.php'),
-					{
-						path,
-						url: urlInput.value,
-						hashAlgo: hashAlgoSelect.value,
-						hash: hashInput.value,
-					},
+					generateFilePath('transfer', 'ajax', 'batch.php'),
+					{ transfers },
 				)
-				// Track the job token so the status panel can poll for progress
-				trackJob(resp.data.token, path)
+				for (const job of resp.data.jobs) {
+					trackJob(job.token, job.path)
+				}
 				close()
 			} catch (error) {
 				const msg = (error.response && error.response.status)
 					? t('transfer', 'Failed to add the upload to the queue. The server responded with status code {statusCode}.', { statusCode: error.response.status })
 					: t('transfer', 'Failed to add the upload to the queue.')
 				showError(msg)
-				submitBtn.disabled = false
-				cancelBtn.disabled = false
+				if (submitBtn) submitBtn.disabled = false
+				if (cancelBtn) cancelBtn.disabled = false
 			}
 		}
 
-		submitBtn.addEventListener('click', submit)
-		dialog.addEventListener('keydown', (e) => {
-			if (e.key === 'Enter' && !submitBtn.disabled) {
-				e.preventDefault()
-				submit()
-			}
-		})
-
-		urlInput.focus()
+		renderDialog()
+		dialog.querySelector('.transfer-row-url')?.focus()
 	})
 }
 

@@ -9,6 +9,7 @@ use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
 use OCP\AppFramework\Http\Attribute\UserRateLimit;
 use OCP\AppFramework\Http\DataResponse;
+use OCP\AppFramework\Services\IAppConfig;
 use OCP\BackgroundJob\IJobList;
 use OCP\Http\Client\IClientService;
 use OCP\Http\Client\LocalServerException;
@@ -27,6 +28,7 @@ class TransferController extends Controller {
 	private TransferService $service;
 	private ISecureRandom $secureRandom;
 	private TransferJobMapper $mapper;
+	private IAppConfig $appConfig;
 
 	/**
 	 * Maps MIME types returned by Content-Type headers to file extensions.
@@ -76,6 +78,7 @@ class TransferController extends Controller {
 		TransferService $service,
 		ISecureRandom $secureRandom,
 		TransferJobMapper $mapper,
+		IAppConfig $appConfig,
 		string $UserId,
 	) {
 		parent::__construct($AppName, $request);
@@ -85,6 +88,7 @@ class TransferController extends Controller {
 		$this->service = $service;
 		$this->secureRandom = $secureRandom;
 		$this->mapper = $mapper;
+		$this->appConfig = $appConfig;
 	}
 
 	/**
@@ -153,6 +157,93 @@ class TransferController extends Controller {
 		]);
 
 		return new DataResponse(['token' => $token], Http::STATUS_OK);
+	}
+
+	/**
+	 * Queue multiple background downloads at once.
+	 *
+	 * Accepts an array of transfer objects and enqueues each one as a separate
+	 * background job. Returns an array of tokens in the same order so the
+	 * frontend can track each job independently.
+	 *
+	 * The maximum number of transfers per call is governed by the admin setting
+	 * `max_urls` (default 3, maximum 10).
+	 *
+	 * @param list<array{url: string, path: string, hashAlgo: string, hash: string}> $transfers
+	 *
+	 * @return DataResponse<Http::STATUS_OK, array{jobs: list<array{token: string, path: string}>}, array{}>
+	 *       | DataResponse<Http::STATUS_BAD_REQUEST, string, array{}>
+	 */
+	#[NoAdminRequired]
+	#[UserRateLimit(limit: 20, period: 60)]
+	public function batch(array $transfers): DataResponse {
+		$maxUrls = $this->appConfig->getAppValueInt('max_urls', 3);
+
+		if (empty($transfers)) {
+			return new DataResponse('At least one transfer is required', Http::STATUS_BAD_REQUEST);
+		}
+
+		if (count($transfers) > $maxUrls) {
+			return new DataResponse(
+				sprintf('Maximum %d URLs are allowed per request', $maxUrls),
+				Http::STATUS_BAD_REQUEST,
+			);
+		}
+
+		$now = time();
+		$jobs = [];
+
+		foreach ($transfers as $transfer) {
+			$path     = (string) ($transfer['path']     ?? '');
+			$url      = (string) ($transfer['url']      ?? '');
+			$hashAlgo = (string) ($transfer['hashAlgo'] ?? '');
+			$hash     = (string) ($transfer['hash']     ?? '');
+
+			if (basename($path) === '') {
+				return new DataResponse('File name is required for each transfer', Http::STATUS_BAD_REQUEST);
+			}
+
+			if (str_contains($path, '..') || str_contains($path, "\0")) {
+				return new DataResponse('Invalid path', Http::STATUS_BAD_REQUEST);
+			}
+
+			if (!$this->isValidRemoteUrl($url)) {
+				return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
+			}
+
+			if ($hash !== '' && $hashAlgo === '') {
+				return new DataResponse('A hash algorithm is required when a checksum is provided', Http::STATUS_BAD_REQUEST);
+			}
+
+			if ($hashAlgo !== '' && !in_array($hashAlgo, ['md5', 'sha1', 'sha256', 'sha512'], true)) {
+				return new DataResponse('Unsupported hash algorithm', Http::STATUS_BAD_REQUEST);
+			}
+
+			$token = $this->secureRandom->generate(32, ISecureRandom::CHAR_ALPHANUMERIC);
+
+			$entity = new TransferJobEntity();
+			$entity->setToken($token);
+			$entity->setUserId($this->userId);
+			$entity->setUrl($url);
+			$entity->setPath($path);
+			$entity->setStatus(TransferJobEntity::STATUS_QUEUED);
+			$entity->setCreatedAt($now);
+			$entity->setUpdatedAt($now);
+			$this->mapper->insert($entity);
+
+			$this->jobList->add(TransferJob::class, [
+				'userId'   => $this->userId,
+				'path'     => $path,
+				'url'      => $url,
+				'hashAlgo' => $hashAlgo,
+				'hash'     => $hash,
+				'token'    => $token,
+			]);
+
+			$jobs[] = ['token' => $token, 'path' => $path];
+		}
+
+		return new DataResponse(['jobs' => $jobs], Http::STATUS_OK);
 	}
 
 	/**
