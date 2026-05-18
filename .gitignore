@@ -136,5 +136,9 @@ js
 # Appstore tarball builds
 transfer.tar.gz
 
+# PHP dependencies and test cache
+vendor/
+.phpunit.result.cache
+
 # Session handoff docs (local context only)
 docs/HANDOFF.md
