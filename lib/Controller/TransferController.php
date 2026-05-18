@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace OCA\Transfer\Controller;
 
 use OCP\AppFramework\Controller;
-use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
 use OCP\AppFramework\Http\Attribute\UserRateLimit;
@@ -118,6 +117,10 @@ class TransferController extends Controller {
 
 		if (!$this->isValidRemoteUrl($url)) {
 			return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
+		}
+
+		if ($hash !== '' && $hashAlgo === '') {
+			return new DataResponse('A hash algorithm is required when a checksum is provided', Http::STATUS_BAD_REQUEST);
 		}
 
 		if ($hashAlgo !== '' && !in_array($hashAlgo, ['md5', 'sha1', 'sha256', 'sha512'], true)) {

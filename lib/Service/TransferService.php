@@ -110,7 +110,7 @@ class TransferService {
 			// Catches ConnectException (unreachable host), SSL errors,
 			// TooManyRedirectsException, and other network-level failures
 			// not covered by BadResponseException.
-			$msg = $e->getMessage();
+			$msg = $this->sanitizeErrorMessage($e->getMessage());
 			$this->logger->warning('Transfer failed: network error for {url}: {message}', [
 				'url' => $this->sanitizeUrlForLog($url),
 				'message' => $msg,
@@ -178,6 +178,13 @@ class TransferService {
 			return false;
 		}
 
+		if (!$dir instanceof Folder) {
+			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Destination path is not a folder');
+			$this->publishFailedEvent($userId, $url);
+			return false;
+		}
+
 		$filename = $dir->getNonExistingName($filename);
 		$file = $dir->newFile($filename);
 
@@ -193,8 +200,21 @@ class TransferService {
 			return false;
 		}
 
-		$file->putContent($stream);
-		fclose($stream);
+		try {
+			$file->putContent($stream);
+		} catch (\Exception $e) {
+			$this->logger->warning('Transfer failed: could not write file for {url}: {message}', [
+				'url'     => $this->sanitizeUrlForLog($url),
+				'message' => $e->getMessage(),
+				'app'     => self::APP_NAME,
+			]);
+			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Could not write file');
+			$this->publishFailedEvent($userId, $url);
+			return false;
+		} finally {
+			fclose($stream);
+		}
 		$this->cleanupTempFile($tmpPath);
 
 		$actualPath = $dirPath . '/' . $filename;
@@ -227,6 +247,15 @@ class TransferService {
 			. $parsed['host']
 			. (isset($parsed['port']) ? ':' . $parsed['port'] : '')
 			. ($parsed['path'] ?? '');
+	}
+
+	/**
+	 * Strip embedded credentials from any URL-like strings in an exception
+	 * message before storing it in the DB. Guzzle's ConnectException and SSL
+	 * error messages may include the full request URL including `user:pass@`.
+	 */
+	private function sanitizeErrorMessage(string $msg): string {
+		return (string) preg_replace('#([a-z][a-z0-9+\-.]*://)([^@/\s]+@)#i', '$1', $msg);
 	}
 
 	// -------------------------------------------------------------------------
