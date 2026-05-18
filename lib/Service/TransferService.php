@@ -201,6 +201,8 @@ class TransferService {
 				'url' => TransferUtils::sanitizeUrlForLog($url),
 				'app' => self::APP_NAME,
 			]);
+			// Remove the empty NC file node created by newFile() above.
+			try { $file->delete(); } catch (\Exception) {}
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Could not read downloaded file');
 			$this->publishFailedEvent($userId, $url);
@@ -216,6 +218,8 @@ class TransferService {
 				'message' => $e->getMessage(),
 				'app'     => self::APP_NAME,
 			]);
+			// Remove the empty NC file node so the user is not left with a 0-byte file.
+			try { $file->delete(); } catch (\Exception) {}
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Could not write file');
 			$this->publishFailedEvent($userId, $url);

@@ -157,7 +157,7 @@ class TransferController extends Controller {
 	#[NoAdminRequired]
 	#[UserRateLimit(limit: 20, period: 60)]
 	public function batch(array $transfers): DataResponse {
-		$maxUrls = $this->appConfig->getAppValueInt('max_urls', 3);
+		$maxUrls = min(10, max(1, $this->appConfig->getAppValueInt('max_urls', 3)));
 
 		if (empty($transfers)) {
 			return new DataResponse('At least one transfer is required', Http::STATUS_BAD_REQUEST);
@@ -342,6 +342,10 @@ class TransferController extends Controller {
 
 		if ($hash !== '' && $hashAlgo === '') {
 			return new DataResponse('A hash algorithm is required when a checksum is provided', Http::STATUS_BAD_REQUEST);
+		}
+
+		if ($hashAlgo !== '' && $hash === '') {
+			return new DataResponse('A checksum value is required when a hash algorithm is provided', Http::STATUS_BAD_REQUEST);
 		}
 
 		if ($hashAlgo !== '' && !in_array($hashAlgo, ['md5', 'sha1', 'sha256', 'sha512'], true)) {

@@ -643,6 +643,7 @@ function showDialog(currentPath) {
 
 		function close() {
 			rows.forEach(row => clearTimeout(row.probeTimer))
+			document.removeEventListener('keydown', onKey)
 			overlay.remove()
 			resolve()
 		}

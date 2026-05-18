@@ -8,7 +8,6 @@
 use OCP\IL10N;
 
 /** @var IL10N $l */
-script('transfer', 'transfer-main');
 ?>
 
 <div class="section">
