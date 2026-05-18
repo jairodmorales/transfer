@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\Transfer\Controller;
 
 use OCP\AppFramework\Controller;
+use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
 use OCP\AppFramework\Http\Attribute\UserRateLimit;
@@ -13,8 +14,11 @@ use OCP\BackgroundJob\IJobList;
 use OCP\Http\Client\IClientService;
 use OCP\Http\Client\LocalServerException;
 use OCP\IRequest;
+use OCP\Security\ISecureRandom;
 
 use OCA\Transfer\BackgroundJob\TransferJob;
+use OCA\Transfer\Db\TransferJobEntity;
+use OCA\Transfer\Db\TransferJobMapper;
 use OCA\Transfer\Service\TransferService;
 
 class TransferController extends Controller {
@@ -22,6 +26,8 @@ class TransferController extends Controller {
 	private IJobList $jobList;
 	private IClientService $clientService;
 	private TransferService $service;
+	private ISecureRandom $secureRandom;
+	private TransferJobMapper $mapper;
 
 	/**
 	 * Maps MIME types returned by Content-Type headers to file extensions.
@@ -69,6 +75,8 @@ class TransferController extends Controller {
 		IJobList $jobList,
 		IClientService $clientService,
 		TransferService $service,
+		ISecureRandom $secureRandom,
+		TransferJobMapper $mapper,
 		string $UserId,
 	) {
 		parent::__construct($AppName, $request);
@@ -76,21 +84,22 @@ class TransferController extends Controller {
 		$this->jobList = $jobList;
 		$this->clientService = $clientService;
 		$this->service = $service;
+		$this->secureRandom = $secureRandom;
+		$this->mapper = $mapper;
 	}
 
 	/**
 	 * Queue a background download of a remote file into the user's storage.
 	 *
-	 * The actual download runs in a background job so this endpoint returns
-	 * immediately after adding the job to the queue. Progress and outcome
-	 * are reported through the Activity app.
+	 * Returns a token that the client can pass to the status endpoint to track
+	 * progress without polling the Activity log.
 	 *
 	 * @param string $path     Destination path within the user's file space (e.g. /Documents/report.pdf)
 	 * @param string $url      Remote URL to download — http and https only
 	 * @param string $hashAlgo Optional algorithm to verify integrity: md5, sha1, sha256, sha512
 	 * @param string $hash     Optional expected checksum value (hex string, case-insensitive)
 	 *
-	 * @return DataResponse<Http::STATUS_OK, bool, array{}>
+	 * @return DataResponse<Http::STATUS_OK, array{token: string}, array{}>
 	 *       | DataResponse<Http::STATUS_BAD_REQUEST, string, array{}>
 	 */
 	#[NoAdminRequired]
@@ -115,15 +124,57 @@ class TransferController extends Controller {
 			return new DataResponse('Unsupported hash algorithm', Http::STATUS_BAD_REQUEST);
 		}
 
+		// The token is the shared secret between the browser session and the
+		// background job. It is stored in the DB and returned to the frontend
+		// so it can poll /ajax/status.php for progress.
+		$token = $this->secureRandom->generate(32, ISecureRandom::CHAR_ALPHANUMERIC);
+
+		$now = time();
+		$entity = new TransferJobEntity();
+		$entity->setToken($token);
+		$entity->setUserId($this->userId);
+		$entity->setUrl($url);
+		$entity->setPath($path);
+		$entity->setStatus(TransferJobEntity::STATUS_QUEUED);
+		$entity->setCreatedAt($now);
+		$entity->setUpdatedAt($now);
+		$this->mapper->insert($entity);
+
 		$this->jobList->add(TransferJob::class, [
-			'userId' => $this->userId,
-			'path' => $path,
-			'url' => $url,
+			'userId'   => $this->userId,
+			'path'     => $path,
+			'url'      => $url,
 			'hashAlgo' => $hashAlgo,
-			'hash' => $hash,
+			'hash'     => $hash,
+			'token'    => $token,
 		]);
 
-		return new DataResponse(true, Http::STATUS_OK);
+		return new DataResponse(['token' => $token], Http::STATUS_OK);
+	}
+
+	/**
+	 * Return the status of recent transfer jobs for the current user.
+	 *
+	 * The frontend polls this endpoint to update the progress panel. Only jobs
+	 * created within the last 24 hours are returned, keeping the response small.
+	 *
+	 * @return DataResponse<Http::STATUS_OK, list<array{token: string, path: string, status: string, error: ?string, createdAt: int}>, array{}>
+	 */
+	#[NoAdminRequired]
+	#[UserRateLimit(limit: 120, period: 60)]
+	public function status(): DataResponse {
+		$since = time() - 86400; // 24 hours
+		$jobs = $this->mapper->findRecentByUser($this->userId, $since);
+
+		$data = array_map(static fn (TransferJobEntity $job): array => [
+			'token'     => $job->getToken(),
+			'path'      => $job->getPath(),
+			'status'    => $job->getStatus(),
+			'error'     => $job->getError(),
+			'createdAt' => $job->getCreatedAt(),
+		], $jobs);
+
+		return new DataResponse($data, Http::STATUS_OK);
 	}
 
 	/**

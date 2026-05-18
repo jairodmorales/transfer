@@ -8,7 +8,8 @@ use GuzzleHttp\Exception\BadResponseException;
 use OCA\Transfer\Activity\Providers\TransferFailedProvider;
 use OCA\Transfer\Activity\Providers\TransferStartedProvider;
 use OCA\Transfer\Activity\Providers\TransferSucceededProvider;
-use OCP\Activity\IEvent;
+use OCA\Transfer\Db\TransferJobEntity;
+use OCA\Transfer\Db\TransferJobMapper;
 use OCP\Activity\IManager;
 use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
@@ -20,36 +21,46 @@ use Psr\Log\LoggerInterface;
 
 class TransferService {
 	private const APP_NAME = 'transfer';
+
 	public function __construct(
 		private IManager $activityManager,
 		private IClientService $clientService,
 		private IRootFolder $rootFolder,
 		private ITempManager $tempManager,
 		private LoggerInterface $logger,
+		private TransferJobMapper $mapper,
 	) {
 	}
 
 	/**
 	 * Download a remote URL and save the result to the user's file storage.
 	 *
-	 * Runs inside a background job. Publishes an Activity event for each
-	 * outcome (started, succeeded, failed, hash mismatch, blocked).
+	 * Runs inside a background job. Publishes an Activity event and updates the
+	 * transfer_jobs table for each outcome so the frontend panel can poll status.
 	 *
 	 * @param string $userId   Nextcloud user ID that owns the destination folder
 	 * @param string $path     Absolute path within the user's file space
 	 * @param string $url      Remote URL — must be http/https (validated by controller)
 	 * @param string $hashAlgo Hash algorithm to verify the file, or empty string to skip
 	 * @param string $hash     Expected hex hash value, or empty string to skip
+	 * @param string $token    Tracking token created by the controller; used to update job status
 	 *
 	 * @return bool Whether the download and save succeeded
 	 */
-	public function transfer(string $userId, string $path, string $url, string $hashAlgo, string $hash): bool {
+	public function transfer(
+		string $userId,
+		string $path,
+		string $url,
+		string $hashAlgo,
+		string $hash,
+		string $token,
+	): bool {
 		$userFolder = $this->rootFolder->getUserFolder($userId);
 
+		$this->mapper->updateStatus($token, TransferJobEntity::STATUS_RUNNING);
 		$this->publishStartedEvent($userId, $url);
 
 		$tmpPath = $this->tempManager->getTemporaryFile();
-
 		$client = $this->clientService->newClient();
 
 		try {
@@ -77,41 +88,48 @@ class TransferService {
 					'Accept' => '*/*',
 					'Accept-Language' => 'en-US,en;q=0.9',
 				],
+				'sink' => $tmpPath,
 			]);
 		} catch (BadResponseException $e) {
-			$this->logger->warning('Transfer failed: server returned an error for {url}: {message}', [
+			$msg = 'Server returned HTTP ' . $e->getResponse()->getStatusCode();
+			$this->logger->warning('Transfer failed: {msg} for {url}', [
+				'msg' => $msg,
 				'url' => $this->sanitizeUrlForLog($url),
-				'message' => $e->getMessage(),
-				'app' => 'transfer',
+				'app' => self::APP_NAME,
 			]);
 			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
 			$this->publishFailedEvent($userId, $url);
 			return false;
 		} catch (LocalServerException $e) {
 			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Blocked: local address');
 			$this->publishBlockedEvent($userId, $url);
 			return false;
 		} catch (\Exception $e) {
 			// Catches ConnectException (unreachable host), SSL errors,
 			// TooManyRedirectsException, and other network-level failures
-			// that are not covered by BadResponseException.
+			// not covered by BadResponseException.
+			$msg = $e->getMessage();
 			$this->logger->warning('Transfer failed: network error for {url}: {message}', [
 				'url' => $this->sanitizeUrlForLog($url),
-				'message' => $e->getMessage(),
-				'app' => 'transfer',
+				'message' => $msg,
+				'app' => self::APP_NAME,
 			]);
 			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
 			$this->publishFailedEvent($userId, $url);
 			return false;
 		}
 
 		if (!$this->integrityCheckPasses($hashAlgo, $hash, $tmpPath)) {
 			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Checksum mismatch');
 			$this->publishHashFailedEvent($userId, $url);
 			return false;
 		}
 
-		return $this->saveToUserFolder($userId, $path, $url, $tmpPath, $userFolder);
+		return $this->saveToUserFolder($userId, $path, $url, $tmpPath, $token, $userFolder);
 	}
 
 	/**
@@ -134,7 +152,8 @@ class TransferService {
 	}
 
 	/**
-	 * Write the downloaded temp file into the user's Nextcloud folder.
+	 * Write the downloaded temp file into the user's Nextcloud folder and
+	 * mark the job as done.
 	 *
 	 * Uses getNonExistingName() to avoid overwriting files that already exist
 	 * (the actual filename may differ from $path if a collision is detected).
@@ -144,6 +163,7 @@ class TransferService {
 		string $path,
 		string $url,
 		string $tmpPath,
+		string $token,
 		Folder $userFolder,
 	): bool {
 		$dirPath = dirname($path);
@@ -153,6 +173,7 @@ class TransferService {
 			$dir = $userFolder->get($dirPath);
 		} catch (NotFoundException $e) {
 			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Destination folder not found');
 			$this->publishFailedEvent($userId, $url);
 			return false;
 		}
@@ -164,9 +185,10 @@ class TransferService {
 		if ($stream === false) {
 			$this->logger->warning('Transfer failed: could not open temp file for {url}', [
 				'url' => $this->sanitizeUrlForLog($url),
-				'app' => 'transfer',
+				'app' => self::APP_NAME,
 			]);
 			$this->cleanupTempFile($tmpPath);
+			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Could not read downloaded file');
 			$this->publishFailedEvent($userId, $url);
 			return false;
 		}
@@ -176,6 +198,7 @@ class TransferService {
 		$this->cleanupTempFile($tmpPath);
 
 		$actualPath = $dirPath . '/' . $filename;
+		$this->mapper->updateStatus($token, TransferJobEntity::STATUS_DONE);
 		$this->publishSucceededEvent($userId, $actualPath, $url, $file->getId());
 		return true;
 	}
