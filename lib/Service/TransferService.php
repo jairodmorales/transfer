@@ -10,13 +10,16 @@ use OCA\Transfer\Activity\Providers\TransferStartedProvider;
 use OCA\Transfer\Activity\Providers\TransferSucceededProvider;
 use OCA\Transfer\Db\TransferJobEntity;
 use OCA\Transfer\Db\TransferJobMapper;
+use OCA\Transfer\Notification\Notifier;
 use OCP\Activity\IManager;
+use OCP\AppFramework\Services\IAppConfig;
 use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
 use OCP\Files\NotFoundException;
 use OCP\Http\Client\IClientService;
 use OCP\Http\Client\LocalServerException;
 use OCP\ITempManager;
+use OCP\Notification\IManager as INotificationManager;
 use Psr\Log\LoggerInterface;
 
 class TransferService {
@@ -29,6 +32,8 @@ class TransferService {
 		private ITempManager $tempManager,
 		private LoggerInterface $logger,
 		private TransferJobMapper $mapper,
+		private IAppConfig $appConfig,
+		private INotificationManager $notificationManager,
 	) {
 	}
 
@@ -94,61 +99,60 @@ class TransferService {
 			$msg = 'Server returned HTTP ' . $e->getResponse()->getStatusCode();
 			$this->logger->warning('Transfer failed: {msg} for {url}', [
 				'msg' => $msg,
-				'url' => $this->sanitizeUrlForLog($url),
+				'url' => TransferUtils::sanitizeUrlForLog($url),
 				'app' => self::APP_NAME,
 			]);
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
 			$this->publishFailedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), $msg);
 			return false;
 		} catch (LocalServerException $e) {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Blocked: local address');
 			$this->publishBlockedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), 'Blocked: local address');
 			return false;
 		} catch (\Exception $e) {
 			// Catches ConnectException (unreachable host), SSL errors,
 			// TooManyRedirectsException, and other network-level failures
 			// not covered by BadResponseException.
-			$msg = $this->sanitizeErrorMessage($e->getMessage());
+			$msg = TransferUtils::sanitizeErrorMessage($e->getMessage());
 			$this->logger->warning('Transfer failed: network error for {url}: {message}', [
-				'url' => $this->sanitizeUrlForLog($url),
+				'url' => TransferUtils::sanitizeUrlForLog($url),
 				'message' => $msg,
 				'app' => self::APP_NAME,
 			]);
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
 			$this->publishFailedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), $msg);
 			return false;
 		}
 
-		if (!$this->integrityCheckPasses($hashAlgo, $hash, $tmpPath)) {
+		// Enforce the admin-configured file size limit (0 = unlimited).
+		$maxSizeMb = $this->appConfig->getAppValueInt('max_size_mb', 0);
+		if ($maxSizeMb > 0) {
+			$actualBytes = filesize($tmpPath);
+			if ($actualBytes !== false && $actualBytes > $maxSizeMb * 1024 * 1024) {
+				$msg = sprintf('File exceeds size limit of %d MB', $maxSizeMb);
+				$this->cleanupTempFile($tmpPath);
+				$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
+				$this->publishFailedEvent($userId, $url);
+				$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), $msg);
+				return false;
+			}
+		}
+
+		if (!TransferUtils::integrityCheckPasses($hashAlgo, $hash, $tmpPath)) {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Checksum mismatch');
 			$this->publishHashFailedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), 'Checksum mismatch');
 			return false;
 		}
 
 		return $this->saveToUserFolder($userId, $path, $url, $tmpPath, $token, $userFolder);
-	}
-
-	/**
-	 * Returns true if integrity verification is disabled (no hash provided) or
-	 * if the file's computed hash matches the expected value.
-	 *
-	 * Uses hash_equals() for constant-time comparison to avoid timing leaks,
-	 * and normalises the expected hash to lowercase so the comparison is
-	 * case-insensitive (callers may paste either upper- or lowercase hashes).
-	 */
-	private function integrityCheckPasses(string $hashAlgo, string $hash, string $tmpPath): bool {
-		if ($hash === '') {
-			return true;
-		}
-		$computed = hash_file($hashAlgo, $tmpPath);
-		if ($computed === false) {
-			return false;
-		}
-		return hash_equals($computed, strtolower(trim($hash)));
 	}
 
 	/**
@@ -175,6 +179,7 @@ class TransferService {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Destination folder not found');
 			$this->publishFailedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, 'Destination folder not found');
 			return false;
 		}
 
@@ -182,6 +187,7 @@ class TransferService {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Destination path is not a folder');
 			$this->publishFailedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, 'Destination path is not a folder');
 			return false;
 		}
 
@@ -191,12 +197,13 @@ class TransferService {
 		$stream = fopen($tmpPath, 'r');
 		if ($stream === false) {
 			$this->logger->warning('Transfer failed: could not open temp file for {url}', [
-				'url' => $this->sanitizeUrlForLog($url),
+				'url' => TransferUtils::sanitizeUrlForLog($url),
 				'app' => self::APP_NAME,
 			]);
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Could not read downloaded file');
 			$this->publishFailedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, 'Could not read downloaded file');
 			return false;
 		}
 
@@ -204,13 +211,14 @@ class TransferService {
 			$file->putContent($stream);
 		} catch (\Exception $e) {
 			$this->logger->warning('Transfer failed: could not write file for {url}: {message}', [
-				'url'     => $this->sanitizeUrlForLog($url),
+				'url'     => TransferUtils::sanitizeUrlForLog($url),
 				'message' => $e->getMessage(),
 				'app'     => self::APP_NAME,
 			]);
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Could not write file');
 			$this->publishFailedEvent($userId, $url);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, 'Could not write file');
 			return false;
 		} finally {
 			fclose($stream);
@@ -220,7 +228,40 @@ class TransferService {
 		$actualPath = $dirPath . '/' . $filename;
 		$this->mapper->updateStatus($token, TransferJobEntity::STATUS_DONE);
 		$this->publishSucceededEvent($userId, $actualPath, $url, $file->getId());
+		$this->sendNotification($userId, $token, Notifier::SUBJECT_DONE, $filename);
 		return true;
+	}
+
+	/**
+	 * Send a native Nextcloud notification to the user.
+	 * Notifications are best-effort — failures are logged but do not affect job status.
+	 */
+	private function sendNotification(
+		string $userId,
+		string $token,
+		string $subject,
+		string $filename,
+		string $error = '',
+	): void {
+		try {
+			$params = ['filename' => $filename];
+			if ($error !== '') {
+				$params['error'] = $error;
+			}
+			$notification = $this->notificationManager->createNotification();
+			$notification
+				->setApp('transfer')
+				->setUser($userId)
+				->setDateTime(new \DateTime())
+				->setObject('transfer', $token)
+				->setSubject($subject, $params);
+			$this->notificationManager->notify($notification);
+		} catch (\Exception $e) {
+			$this->logger->debug('Transfer: failed to send notification: {msg}', [
+				'msg' => $e->getMessage(),
+				'app' => self::APP_NAME,
+			]);
+		}
 	}
 
 	/**
@@ -231,31 +272,6 @@ class TransferService {
 		if (file_exists($tmpPath)) {
 			unlink($tmpPath);
 		}
-	}
-
-	/**
-	 * Strip the userinfo component (user:password@) from a URL before writing
-	 * it to logs. Credentials embedded in URLs must not appear in log files
-	 * where other administrators or monitoring systems could read them.
-	 */
-	private function sanitizeUrlForLog(string $url): string {
-		$parsed = parse_url($url);
-		if ($parsed === false || !isset($parsed['host'])) {
-			return '[invalid URL]';
-		}
-		return ($parsed['scheme'] ?? 'https') . '://'
-			. $parsed['host']
-			. (isset($parsed['port']) ? ':' . $parsed['port'] : '')
-			. ($parsed['path'] ?? '');
-	}
-
-	/**
-	 * Strip embedded credentials from any URL-like strings in an exception
-	 * message before storing it in the DB. Guzzle's ConnectException and SSL
-	 * error messages may include the full request URL including `user:pass@`.
-	 */
-	private function sanitizeErrorMessage(string $msg): string {
-		return (string) preg_replace('#([a-z][a-z0-9+\-.]*://)([^@/\s]+@)#i', '$1', $msg);
 	}
 
 	// -------------------------------------------------------------------------
@@ -311,9 +327,7 @@ class TransferService {
 	}
 
 	/**
-	 * Build and publish an Activity event. The five typed helpers above use
-	 * this to avoid repeating the generateEvent / setApp / setAffectedUser /
-	 * publish boilerplate for every outcome.
+	 * Build and publish an Activity event.
 	 *
 	 * @param array<string, mixed> $subjectParams
 	 */

@@ -20,6 +20,7 @@ use OCA\Transfer\BackgroundJob\TransferJob;
 use OCA\Transfer\Db\TransferJobEntity;
 use OCA\Transfer\Db\TransferJobMapper;
 use OCA\Transfer\Service\TransferService;
+use OCA\Transfer\Service\TransferUtils;
 
 class TransferController extends Controller {
 	private string $userId;
@@ -267,6 +268,11 @@ class TransferController extends Controller {
 			return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
 		}
 
+		$host = (string) (parse_url($url, PHP_URL_HOST) ?: '');
+		if ($host !== '' && TransferUtils::isDomainBlocked($host, $this->getBlocklist())) {
+			return new DataResponse(['extension' => ''], Http::STATUS_FORBIDDEN);
+		}
+
 		try {
 			$client = $this->clientService->newClient();
 			$response = $client->head($url, ['timeout' => 10]);
@@ -282,18 +288,22 @@ class TransferController extends Controller {
 		}
 	}
 
-	/**
-	 * Returns true only for absolute http/https URLs with a non-empty host.
-	 *
-	 * Rejects file://, gopher://, data: and other non-HTTP schemes that could
-	 * be used to read local files or probe internal services (SSRF).
-	 */
 	private function isValidRemoteUrl(string $url): bool {
-		$parsed = parse_url($url);
-		return $parsed !== false
-			&& isset($parsed['scheme'], $parsed['host'])
-			&& $parsed['host'] !== ''
-			&& in_array($parsed['scheme'], ['http', 'https'], true);
+		return TransferUtils::isValidRemoteUrl($url);
+	}
+
+	/**
+	 * Parse the admin-configured domain blocklist into an array of entries.
+	 * Stored as a newline-delimited string; blank lines are stripped.
+	 *
+	 * @return string[]
+	 */
+	private function getBlocklist(): array {
+		$raw = $this->appConfig->getAppValueString('domain_blocklist', '');
+		if ($raw === '') {
+			return [];
+		}
+		return array_values(array_filter(array_map('trim', explode("\n", $raw))));
 	}
 
 	/**
@@ -319,6 +329,11 @@ class TransferController extends Controller {
 
 		if (!$this->isValidRemoteUrl($url)) {
 			return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
+		}
+
+		$host = (string) (parse_url($url, PHP_URL_HOST) ?: '');
+		if ($host !== '' && TransferUtils::isDomainBlocked($host, $this->getBlocklist())) {
+			return new DataResponse('Domain is blocked by administrator', Http::STATUS_BAD_REQUEST);
 		}
 
 		if ($hash !== '' && $hashAlgo === '') {
