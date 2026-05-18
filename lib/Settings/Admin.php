@@ -18,6 +18,8 @@ class Admin implements ISettings {
 		return new TemplateResponse('transfer', 'admin', [
 			'maxUrls'       => $this->appConfig->getAppValueInt('max_urls', 3),
 			'retentionDays' => $this->appConfig->getAppValueInt('retention_days', 30),
+			'maxSizeMb'     => $this->appConfig->getAppValueInt('max_size_mb', 0),
+			'domainBlocklist' => $this->appConfig->getAppValueString('domain_blocklist', ''),
 		], TemplateResponse::RENDER_AS_BLANK);
 	}
 
