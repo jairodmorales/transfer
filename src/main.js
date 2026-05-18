@@ -270,7 +270,6 @@ function renderPanel() {
 		document.body.appendChild(panelEl)
 	}
 
-	const count = trackedJobs.size
 	const activeCount = [...trackedJobs.values()].filter(j => j.status === 'queued' || j.status === 'running').length
 
 	const headerLabel = activeCount > 0
@@ -312,16 +311,22 @@ async function doPoll() {
 	pollTimer = null
 	try {
 		const resp = await axios.get(generateFilePath('transfer', 'ajax', 'status.php'))
+		let changed = false
 		for (const job of resp.data) {
 			if (trackedJobs.has(job.token)) {
 				const current = trackedJobs.get(job.token)
-				// Only update if status changed to avoid unnecessary re-renders
 				if (current.status !== job.status || current.error !== job.error) {
 					trackedJobs.set(job.token, { ...current, status: job.status, error: job.error })
+					changed = true
+					if (job.status === 'done' || job.status === 'failed') {
+						// Remove terminal jobs after 30 s so the map stays bounded
+						// and polling stops naturally once all jobs are gone.
+						setTimeout(() => trackedJobs.delete(job.token), 30000)
+					}
 				}
 			}
 		}
-		renderPanel()
+		if (changed) renderPanel()
 	} catch {
 		// Ignore poll failures — the panel simply stops updating until the next cycle
 	}
