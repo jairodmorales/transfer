@@ -60,6 +60,7 @@ class TransferService {
 		string $hash,
 		string $token,
 	): bool {
+		$filename = basename($path);
 		$userFolder = $this->rootFolder->getUserFolder($userId);
 
 		$this->mapper->updateStatus($token, TransferJobEntity::STATUS_RUNNING);
@@ -105,13 +106,13 @@ class TransferService {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
 			$this->publishFailedEvent($userId, $url);
-			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), $msg);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, $msg);
 			return false;
 		} catch (LocalServerException $e) {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Blocked: local address');
 			$this->publishBlockedEvent($userId, $url);
-			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), 'Blocked: local address');
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, 'Blocked: local address');
 			return false;
 		} catch (\Exception $e) {
 			// Catches ConnectException (unreachable host), SSL errors,
@@ -126,7 +127,7 @@ class TransferService {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
 			$this->publishFailedEvent($userId, $url);
-			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), $msg);
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, $msg);
 			return false;
 		}
 
@@ -139,7 +140,7 @@ class TransferService {
 				$this->cleanupTempFile($tmpPath);
 				$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, $msg);
 				$this->publishFailedEvent($userId, $url);
-				$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), $msg);
+				$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, $msg);
 				return false;
 			}
 		}
@@ -148,7 +149,7 @@ class TransferService {
 			$this->cleanupTempFile($tmpPath);
 			$this->mapper->updateStatus($token, TransferJobEntity::STATUS_FAILED, 'Checksum mismatch');
 			$this->publishHashFailedEvent($userId, $url);
-			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, basename($path), 'Checksum mismatch');
+			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, 'Checksum mismatch');
 			return false;
 		}
 

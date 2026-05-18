@@ -172,6 +172,8 @@ class TransferController extends Controller {
 
 		// Validate all items first so no DB rows are inserted if any item fails.
 		// This makes the operation atomic: all-or-nothing, no orphaned rows.
+		// Parse the blocklist once here so it is not re-read from config per item.
+		$blocklist = $this->getBlocklist();
 		$validated = [];
 		foreach ($transfers as $transfer) {
 			$path     = (string) ($transfer['path']     ?? '');
@@ -179,7 +181,7 @@ class TransferController extends Controller {
 			$hashAlgo = (string) ($transfer['hashAlgo'] ?? '');
 			$hash     = (string) ($transfer['hash']     ?? '');
 
-			$error = $this->validateTransferInput($path, $url, $hashAlgo, $hash);
+			$error = $this->validateTransferInput($path, $url, $hashAlgo, $hash, $blocklist);
 			if ($error !== null) {
 				return $error;
 			}
@@ -264,7 +266,7 @@ class TransferController extends Controller {
 	#[NoAdminRequired]
 	#[UserRateLimit(limit: 60, period: 60)]
 	public function probe(string $url): DataResponse {
-		if (!$this->isValidRemoteUrl($url)) {
+		if (!TransferUtils::isValidRemoteUrl($url)) {
 			return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
 		}
 
@@ -288,13 +290,10 @@ class TransferController extends Controller {
 		}
 	}
 
-	private function isValidRemoteUrl(string $url): bool {
-		return TransferUtils::isValidRemoteUrl($url);
-	}
-
 	/**
-	 * Parse the admin-configured domain blocklist into an array of entries.
-	 * Stored as a newline-delimited string; blank lines are stripped.
+	 * Parse the admin-configured domain blocklist into an array of normalised entries.
+	 * Stored as a newline-delimited string; blank lines and surrounding whitespace are
+	 * stripped and entries are lowercased so isDomainBlocked() receives clean input.
 	 *
 	 * @return string[]
 	 */
@@ -303,19 +302,23 @@ class TransferController extends Controller {
 		if ($raw === '') {
 			return [];
 		}
-		return array_values(array_filter(array_map('trim', explode("\n", $raw))));
+		return array_values(array_filter(array_map(
+			static fn(string $e): string => strtolower(trim($e)),
+			explode("\n", $raw)
+		)));
 	}
 
 	/**
 	 * Validate a single transfer input tuple.
 	 *
 	 * Returns a 400 DataResponse if any constraint is violated, null otherwise.
-	 * Shared by transfer() (single) and batch() (first-pass loop) so the rules
-	 * are defined in exactly one place.
+	 * Pass a pre-computed $blocklist when calling from a loop to avoid re-parsing
+	 * the config on every iteration.
 	 *
+	 * @param string[] $blocklist Pre-parsed domain blocklist (defaults to reading config)
 	 * @return DataResponse<Http::STATUS_BAD_REQUEST, string, array{}>|null
 	 */
-	private function validateTransferInput(string $path, string $url, string $hashAlgo, string $hash): ?DataResponse {
+	private function validateTransferInput(string $path, string $url, string $hashAlgo, string $hash, array $blocklist = []): ?DataResponse {
 		if (basename($path) === '') {
 			return new DataResponse('File name is required', Http::STATUS_BAD_REQUEST);
 		}
@@ -327,12 +330,13 @@ class TransferController extends Controller {
 			return new DataResponse('Invalid path', Http::STATUS_BAD_REQUEST);
 		}
 
-		if (!$this->isValidRemoteUrl($url)) {
+		if (!TransferUtils::isValidRemoteUrl($url)) {
 			return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
 		}
 
+		$list = $blocklist !== [] ? $blocklist : $this->getBlocklist();
 		$host = (string) (parse_url($url, PHP_URL_HOST) ?: '');
-		if ($host !== '' && TransferUtils::isDomainBlocked($host, $this->getBlocklist())) {
+		if ($host !== '' && TransferUtils::isDomainBlocked($host, $list)) {
 			return new DataResponse('Domain is blocked by administrator', Http::STATUS_BAD_REQUEST);
 		}
 

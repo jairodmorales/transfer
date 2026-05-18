@@ -37,7 +37,7 @@ class TransferUtils {
 			}
 			if (str_starts_with($entry, '*.')) {
 				// "*.evil.com" matches "sub.evil.com" but not "evil.com" itself
-				$suffix = substr($entry, 1); // ".evil.com"
+				$suffix = substr($entry, 1);
 				if (str_ends_with($host, $suffix)) {
 					return true;
 				}
