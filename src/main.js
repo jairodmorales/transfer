@@ -722,15 +722,13 @@ addNewFileMenuEntry({
 async function initPanel() {
 	try {
 		const oneHourAgo = Math.floor(Date.now() / 1000) - 3600
-		// Pass since= so the server only returns the last hour; active jobs in
-		// that window cover most cases (jobs running >1 h are an edge case).
 		const resp = await axios.get(generateUrl('/apps/transfer/ajax/status.php'), {
 			params: { since: oneHourAgo },
 		})
 
 		for (const job of resp.data) {
 			const active = isActiveStatus(job.status)
-			const recentTerminal = isTerminalStatus(job.status) && job.createdAt >= oneHourAgo
+			const recentTerminal = isTerminalStatus(job.status)
 
 			if (!active && !recentTerminal) continue
 

@@ -108,32 +108,11 @@ class TransferController extends Controller {
 	#[NoAdminRequired]
 	#[UserRateLimit(limit: 30, period: 60)]
 	public function transfer(string $path, string $url, string $hashAlgo, string $hash): DataResponse {
-		if (basename($path) === '') {
-			return new DataResponse('File name is required', Http::STATUS_BAD_REQUEST);
+		$error = $this->validateTransferInput($path, $url, $hashAlgo, $hash);
+		if ($error !== null) {
+			return $error;
 		}
 
-		// Reject traversal sequences and null bytes before the path reaches the
-		// filesystem layer. Nextcloud's virtual FS also rejects these, but
-		// doing it here avoids queuing a job that will fail immediately.
-		if (str_contains($path, '..') || str_contains($path, "\0")) {
-			return new DataResponse('Invalid path', Http::STATUS_BAD_REQUEST);
-		}
-
-		if (!$this->isValidRemoteUrl($url)) {
-			return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
-		}
-
-		if ($hash !== '' && $hashAlgo === '') {
-			return new DataResponse('A hash algorithm is required when a checksum is provided', Http::STATUS_BAD_REQUEST);
-		}
-
-		if ($hashAlgo !== '' && !in_array($hashAlgo, ['md5', 'sha1', 'sha256', 'sha512'], true)) {
-			return new DataResponse('Unsupported hash algorithm', Http::STATUS_BAD_REQUEST);
-		}
-
-		// The token is the shared secret between the browser session and the
-		// background job. It is stored in the DB and returned to the frontend
-		// so it can poll /ajax/status.php for progress.
 		$token = $this->secureRandom->generate(32, ISecureRandom::CHAR_ALPHANUMERIC);
 
 		$now = time();
@@ -190,10 +169,8 @@ class TransferController extends Controller {
 			);
 		}
 
-		// Pass 1: validate every item before touching the DB.
-		// This makes the operation atomic: either all items are valid (and all
-		// jobs get queued below) or none are — avoiding orphaned DB rows when
-		// a later item fails validation after earlier ones were already inserted.
+		// Validate all items first so no DB rows are inserted if any item fails.
+		// This makes the operation atomic: all-or-nothing, no orphaned rows.
 		$validated = [];
 		foreach ($transfers as $transfer) {
 			$path     = (string) ($transfer['path']     ?? '');
@@ -201,30 +178,14 @@ class TransferController extends Controller {
 			$hashAlgo = (string) ($transfer['hashAlgo'] ?? '');
 			$hash     = (string) ($transfer['hash']     ?? '');
 
-			if (basename($path) === '') {
-				return new DataResponse('File name is required for each transfer', Http::STATUS_BAD_REQUEST);
-			}
-
-			if (str_contains($path, '..') || str_contains($path, "\0")) {
-				return new DataResponse('Invalid path', Http::STATUS_BAD_REQUEST);
-			}
-
-			if (!$this->isValidRemoteUrl($url)) {
-				return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
-			}
-
-			if ($hash !== '' && $hashAlgo === '') {
-				return new DataResponse('A hash algorithm is required when a checksum is provided', Http::STATUS_BAD_REQUEST);
-			}
-
-			if ($hashAlgo !== '' && !in_array($hashAlgo, ['md5', 'sha1', 'sha256', 'sha512'], true)) {
-				return new DataResponse('Unsupported hash algorithm', Http::STATUS_BAD_REQUEST);
+			$error = $this->validateTransferInput($path, $url, $hashAlgo, $hash);
+			if ($error !== null) {
+				return $error;
 			}
 
 			$validated[] = compact('path', 'url', 'hashAlgo', 'hash');
 		}
 
-		// Pass 2: all items are valid — insert and queue.
 		$now = time();
 		$jobs = [];
 		foreach ($validated as ['path' => $path, 'url' => $url, 'hashAlgo' => $hashAlgo, 'hash' => $hash]) {
@@ -258,17 +219,16 @@ class TransferController extends Controller {
 	/**
 	 * Return the status of recent transfer jobs for the current user.
 	 *
-	 * The frontend polls this endpoint to update the progress panel. Only jobs
-	 * created within the last 24 hours are returned, keeping the response small.
+	 * Callers may pass ?since=<unix_timestamp> to narrow the window (e.g. the
+	 * last hour on page load). Default is 24 h so the panel works without any
+	 * parameter.
 	 *
 	 * @return DataResponse<Http::STATUS_OK, list<array{token: string, path: string, status: string, error: ?string, createdAt: int}>, array{}>
 	 */
 	#[NoAdminRequired]
 	#[UserRateLimit(limit: 120, period: 60)]
 	public function status(int $since = 0): DataResponse {
-		// Callers can pass ?since=<unix_timestamp> to narrow the window.
-		// Default is 24 h so the panel works without any parameter.
-		$cutoff = $since > 0 ? $since : time() - 86400;
+		$cutoff = $since > 0 ? $since : time() - 24 * 3600;
 		$jobs = $this->mapper->findRecentByUser($this->userId, $cutoff);
 
 		$data = array_map(static fn (TransferJobEntity $job): array => [
@@ -334,5 +294,41 @@ class TransferController extends Controller {
 			&& isset($parsed['scheme'], $parsed['host'])
 			&& $parsed['host'] !== ''
 			&& in_array($parsed['scheme'], ['http', 'https'], true);
+	}
+
+	/**
+	 * Validate a single transfer input tuple.
+	 *
+	 * Returns a 400 DataResponse if any constraint is violated, null otherwise.
+	 * Shared by transfer() (single) and batch() (first-pass loop) so the rules
+	 * are defined in exactly one place.
+	 *
+	 * @return DataResponse<Http::STATUS_BAD_REQUEST, string, array{}>|null
+	 */
+	private function validateTransferInput(string $path, string $url, string $hashAlgo, string $hash): ?DataResponse {
+		if (basename($path) === '') {
+			return new DataResponse('File name is required', Http::STATUS_BAD_REQUEST);
+		}
+
+		// Reject traversal sequences and null bytes before the path reaches the
+		// filesystem layer. Nextcloud's virtual FS also rejects these, but
+		// doing it here avoids queuing a job that will fail immediately.
+		if (str_contains($path, '..') || str_contains($path, "\0")) {
+			return new DataResponse('Invalid path', Http::STATUS_BAD_REQUEST);
+		}
+
+		if (!$this->isValidRemoteUrl($url)) {
+			return new DataResponse('Only http and https URLs are supported', Http::STATUS_BAD_REQUEST);
+		}
+
+		if ($hash !== '' && $hashAlgo === '') {
+			return new DataResponse('A hash algorithm is required when a checksum is provided', Http::STATUS_BAD_REQUEST);
+		}
+
+		if ($hashAlgo !== '' && !in_array($hashAlgo, ['md5', 'sha1', 'sha256', 'sha512'], true)) {
+			return new DataResponse('Unsupported hash algorithm', Http::STATUS_BAD_REQUEST);
+		}
+
+		return null;
 	}
 }

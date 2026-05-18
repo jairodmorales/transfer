@@ -102,16 +102,17 @@ script('transfer', 'transfer-main');
 			return;
 		}
 
-		var saved = 0;
+		var saved = 0, failed = false;
 		function onSaved() {
-			saved++;
-			if (saved < 2) return;
+			if (failed) return;
+			if (++saved < 2) return;
 			msg.textContent = t('transfer', 'Saved');
 			msg.className = 'msg success';
 			msg.style.display = '';
 			setTimeout(function () { msg.style.display = 'none'; }, 3000);
 		}
 		function onError() {
+			failed = true;
 			msg.textContent = t('transfer', 'Error saving settings.');
 			msg.className = 'msg error';
 			msg.style.display = '';
