@@ -282,6 +282,9 @@ function showDialog(currentPath) {
 		filenameInput.addEventListener('input', () => { filenameEdited = filenameInput.value !== ''; updateValidity() })
 
 		function close() {
+			// Cancel any pending probe to avoid a stale callback firing after the
+			// dialog has been removed from the DOM.
+			clearTimeout(probeTimer)
 			overlay.remove()
 			resolve()
 		}

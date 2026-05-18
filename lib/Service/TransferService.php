@@ -8,7 +8,9 @@ use GuzzleHttp\Exception\BadResponseException;
 use OCA\Transfer\Activity\Providers\TransferFailedProvider;
 use OCA\Transfer\Activity\Providers\TransferStartedProvider;
 use OCA\Transfer\Activity\Providers\TransferSucceededProvider;
+use OCP\Activity\IEvent;
 use OCP\Activity\IManager;
+use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
 use OCP\Files\NotFoundException;
 use OCP\Http\Client\IClientService;
@@ -17,6 +19,7 @@ use OCP\ITempManager;
 use Psr\Log\LoggerInterface;
 
 class TransferService {
+	private const APP_NAME = 'transfer';
 	public function __construct(
 		private IManager $activityManager,
 		private IClientService $clientService,
@@ -135,15 +138,13 @@ class TransferService {
 	 *
 	 * Uses getNonExistingName() to avoid overwriting files that already exist
 	 * (the actual filename may differ from $path if a collision is detected).
-	 *
-	 * @param \OCP\Files\Folder $userFolder
 	 */
 	private function saveToUserFolder(
 		string $userId,
 		string $path,
 		string $url,
 		string $tmpPath,
-		$userFolder,
+		Folder $userFolder,
 	): bool {
 		$dirPath = dirname($path);
 		$filename = basename($path);
@@ -210,48 +211,77 @@ class TransferService {
 	// -------------------------------------------------------------------------
 
 	private function publishStartedEvent(string $userId, string $url): void {
-		$event = $this->activityManager->generateEvent();
-		$event->setApp('transfer');
-		$event->setType(TransferStartedProvider::TYPE_TRANSFER_STARTED);
-		$event->setAffectedUser($userId);
-		$event->setSubject(TransferStartedProvider::SUBJECT_TRANSFER_STARTED, ['url' => $url]);
-		$this->activityManager->publish($event);
+		$this->publishEvent(
+			$userId,
+			TransferStartedProvider::TYPE_TRANSFER_STARTED,
+			TransferStartedProvider::SUBJECT_TRANSFER_STARTED,
+			['url' => $url],
+		);
 	}
 
 	private function publishFailedEvent(string $userId, string $url): void {
-		$event = $this->activityManager->generateEvent();
-		$event->setApp('transfer');
-		$event->setType(TransferFailedProvider::TYPE_TRANSFER_FAILED);
-		$event->setAffectedUser($userId);
-		$event->setSubject(TransferFailedProvider::SUBJECT_TRANSFER_FAILED, ['url' => $url]);
-		$this->activityManager->publish($event);
+		$this->publishEvent(
+			$userId,
+			TransferFailedProvider::TYPE_TRANSFER_FAILED,
+			TransferFailedProvider::SUBJECT_TRANSFER_FAILED,
+			['url' => $url],
+		);
 	}
 
 	private function publishHashFailedEvent(string $userId, string $url): void {
-		$event = $this->activityManager->generateEvent();
-		$event->setApp('transfer');
-		$event->setType(TransferFailedProvider::TYPE_TRANSFER_FAILED);
-		$event->setAffectedUser($userId);
-		$event->setSubject(TransferFailedProvider::SUBJECT_TRANSFER_HASH_FAILED, ['url' => $url]);
-		$this->activityManager->publish($event);
+		$this->publishEvent(
+			$userId,
+			TransferFailedProvider::TYPE_TRANSFER_FAILED,
+			TransferFailedProvider::SUBJECT_TRANSFER_HASH_FAILED,
+			['url' => $url],
+		);
 	}
 
 	private function publishBlockedEvent(string $userId, string $url): void {
-		$event = $this->activityManager->generateEvent();
-		$event->setApp('transfer');
-		$event->setType(TransferFailedProvider::TYPE_TRANSFER_FAILED);
-		$event->setAffectedUser($userId);
-		$event->setSubject(TransferFailedProvider::SUBJECT_TRANSFER_BLOCKED, ['url' => $url]);
-		$this->activityManager->publish($event);
+		$this->publishEvent(
+			$userId,
+			TransferFailedProvider::TYPE_TRANSFER_FAILED,
+			TransferFailedProvider::SUBJECT_TRANSFER_BLOCKED,
+			['url' => $url],
+		);
 	}
 
 	private function publishSucceededEvent(string $userId, string $path, string $url, int $fileId): void {
+		$this->publishEvent(
+			$userId,
+			TransferSucceededProvider::TYPE_TRANSFER_SUCCEEDED,
+			TransferSucceededProvider::SUBJECT_TRANSFER_SUCCEEDED,
+			['url' => $url],
+			'files',
+			$fileId,
+			$path,
+		);
+	}
+
+	/**
+	 * Build and publish an Activity event. The five typed helpers above use
+	 * this to avoid repeating the generateEvent / setApp / setAffectedUser /
+	 * publish boilerplate for every outcome.
+	 *
+	 * @param array<string, mixed> $subjectParams
+	 */
+	private function publishEvent(
+		string $userId,
+		string $type,
+		string $subject,
+		array $subjectParams,
+		?string $objectType = null,
+		?int $objectId = null,
+		?string $objectName = null,
+	): void {
 		$event = $this->activityManager->generateEvent();
-		$event->setApp('transfer');
-		$event->setType(TransferSucceededProvider::TYPE_TRANSFER_SUCCEEDED);
+		$event->setApp(self::APP_NAME);
+		$event->setType($type);
 		$event->setAffectedUser($userId);
-		$event->setSubject(TransferSucceededProvider::SUBJECT_TRANSFER_SUCCEEDED, ['url' => $url]);
-		$event->setObject('files', $fileId, $path);
+		$event->setSubject($subject, $subjectParams);
+		if ($objectType !== null && $objectId !== null && $objectName !== null) {
+			$event->setObject($objectType, $objectId, $objectName);
+		}
 		$this->activityManager->publish($event);
 	}
 }
