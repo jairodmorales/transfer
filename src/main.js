@@ -298,12 +298,24 @@ function statusIcon(status) {
 	return SPIN_SVG
 }
 
+function isActiveStatus(status) {
+	return status === 'queued' || status === 'running'
+}
+
+function isTerminalStatus(status) {
+	return status === 'done' || status === 'failed'
+}
+
 function statusLabel(status, error) {
 	if (status === 'queued') return t('transfer', 'Queued')
 	if (status === 'running') return t('transfer', 'Downloading…')
 	if (status === 'done') return t('transfer', 'Done')
 	if (status === 'failed') return error || t('transfer', 'Failed')
 	return status
+}
+
+function scheduleJobPrune(token) {
+	setTimeout(() => trackedJobs.delete(token), 30000)
 }
 
 function renderPanel() {
@@ -323,7 +335,7 @@ function renderPanel() {
 		document.body.appendChild(panelEl)
 	}
 
-	const activeCount = [...trackedJobs.values()].filter(j => j.status === 'queued' || j.status === 'running').length
+	const activeCount = [...trackedJobs.values()].filter(j => isActiveStatus(j.status)).length
 
 	const headerLabel = activeCount > 0
 		? t('transfer', 'Transfers ({n} active)', { n: activeCount })
@@ -355,7 +367,7 @@ function renderPanel() {
 }
 
 function scheduleNextPoll() {
-	const hasActive = [...trackedJobs.values()].some(j => j.status === 'queued' || j.status === 'running')
+	const hasActive = [...trackedJobs.values()].some(j => isActiveStatus(j.status))
 	if (!hasActive || pollTimer) return
 	pollTimer = setTimeout(doPoll, 3000)
 }
@@ -371,10 +383,8 @@ async function doPoll() {
 				if (current.status !== job.status || current.error !== job.error) {
 					trackedJobs.set(job.token, { ...current, status: job.status, error: job.error })
 					changed = true
-					if (job.status === 'done' || job.status === 'failed') {
-						// Remove terminal jobs after 30 s so the map stays bounded
-						// and polling stops naturally once all jobs are gone.
-						setTimeout(() => trackedJobs.delete(job.token), 30000)
+					if (isTerminalStatus(job.status)) {
+						scheduleJobPrune(job.token)
 					}
 				}
 			}
@@ -708,29 +718,17 @@ addNewFileMenuEntry({
 // Panel initialization — restore active/recent jobs on page load
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * On page load, fetch the user's recent jobs and pre-populate the panel.
- *
- * - Active jobs (queued/running): tracked and polled until they complete,
- *   covering transfers started in another tab or before a page refresh.
- * - Terminal jobs from the last hour (done/failed): shown briefly so the
- *   user sees recent history, then auto-removed after 30 s (same as the
- *   poll-based pruning path).
- * - Older terminal jobs: ignored — they are history, not actionable.
- *
- * Failures are silently swallowed; the panel simply starts empty.
- */
+// Pre-populate the panel with jobs from other tabs or previous sessions.
 async function initPanel() {
 	try {
 		const resp = await axios.get(generateFilePath('transfer', 'ajax', 'status.php'))
 		const oneHourAgo = Math.floor(Date.now() / 1000) - 3600
 
 		for (const job of resp.data) {
-			const isActive = job.status === 'queued' || job.status === 'running'
-			const isRecentTerminal = (job.status === 'done' || job.status === 'failed')
-				&& job.createdAt >= oneHourAgo
+			const active = isActiveStatus(job.status)
+			const recentTerminal = isTerminalStatus(job.status) && job.createdAt >= oneHourAgo
 
-			if (!isActive && !isRecentTerminal) continue
+			if (!active && !recentTerminal) continue
 
 			trackedJobs.set(job.token, {
 				path:   job.path,
@@ -738,15 +736,16 @@ async function initPanel() {
 				error:  job.error,
 			})
 
-			if (isRecentTerminal) {
-				setTimeout(() => trackedJobs.delete(job.token), 30000)
-			}
+			if (recentTerminal) scheduleJobPrune(job.token)
 		}
 
-		if (trackedJobs.size > 0) renderPanel()
+		if (trackedJobs.size > 0) {
+			panelHidden = false
+			renderPanel()
+		}
 		scheduleNextPoll()
 	} catch {
-		// Silently ignore — panel starts empty if the request fails
+		// panel starts empty if the request fails
 	}
 }
 
