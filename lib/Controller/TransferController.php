@@ -190,9 +190,11 @@ class TransferController extends Controller {
 			);
 		}
 
-		$now = time();
-		$jobs = [];
-
+		// Pass 1: validate every item before touching the DB.
+		// This makes the operation atomic: either all items are valid (and all
+		// jobs get queued below) or none are — avoiding orphaned DB rows when
+		// a later item fails validation after earlier ones were already inserted.
+		$validated = [];
 		foreach ($transfers as $transfer) {
 			$path     = (string) ($transfer['path']     ?? '');
 			$url      = (string) ($transfer['url']      ?? '');
@@ -219,6 +221,13 @@ class TransferController extends Controller {
 				return new DataResponse('Unsupported hash algorithm', Http::STATUS_BAD_REQUEST);
 			}
 
+			$validated[] = compact('path', 'url', 'hashAlgo', 'hash');
+		}
+
+		// Pass 2: all items are valid — insert and queue.
+		$now = time();
+		$jobs = [];
+		foreach ($validated as ['path' => $path, 'url' => $url, 'hashAlgo' => $hashAlgo, 'hash' => $hash]) {
 			$token = $this->secureRandom->generate(32, ISecureRandom::CHAR_ALPHANUMERIC);
 
 			$entity = new TransferJobEntity();
@@ -256,9 +265,11 @@ class TransferController extends Controller {
 	 */
 	#[NoAdminRequired]
 	#[UserRateLimit(limit: 120, period: 60)]
-	public function status(): DataResponse {
-		$since = time() - 86400; // 24 hours
-		$jobs = $this->mapper->findRecentByUser($this->userId, $since);
+	public function status(int $since = 0): DataResponse {
+		// Callers can pass ?since=<unix_timestamp> to narrow the window.
+		// Default is 24 h so the panel works without any parameter.
+		$cutoff = $since > 0 ? $since : time() - 86400;
+		$jobs = $this->mapper->findRecentByUser($this->userId, $cutoff);
 
 		$data = array_map(static fn (TransferJobEntity $job): array => [
 			'token'     => $job->getToken(),

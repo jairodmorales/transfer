@@ -16,7 +16,8 @@ class Admin implements ISettings {
 
 	public function getForm(): TemplateResponse {
 		return new TemplateResponse('transfer', 'admin', [
-			'maxUrls' => $this->appConfig->getAppValueInt('max_urls', 3),
+			'maxUrls'       => $this->appConfig->getAppValueInt('max_urls', 3),
+			'retentionDays' => $this->appConfig->getAppValueInt('retention_days', 30),
 		], TemplateResponse::RENDER_AS_BLANK);
 	}
 

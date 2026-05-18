@@ -1,7 +1,7 @@
 import { addNewFileMenuEntry, Permission } from '@nextcloud/files'
 import { loadState } from '@nextcloud/initial-state'
 import { translate as t } from '@nextcloud/l10n'
-import { generateFilePath } from '@nextcloud/router'
+import { generateUrl } from '@nextcloud/router'
 import axios from '@nextcloud/axios'
 import { showError } from '@nextcloud/dialogs'
 
@@ -375,7 +375,7 @@ function scheduleNextPoll() {
 async function doPoll() {
 	pollTimer = null
 	try {
-		const resp = await axios.get(generateFilePath('transfer', 'ajax', 'status.php'))
+		const resp = await axios.get(generateUrl('/apps/transfer/ajax/status.php'))
 		let changed = false
 		for (const job of resp.data) {
 			if (trackedJobs.has(job.token)) {
@@ -593,7 +593,7 @@ function showDialog(currentPath) {
 							rows[i].probeTimer = setTimeout(async () => {
 								try {
 									const resp = await axios.get(
-										generateFilePath('transfer', 'ajax', 'probe.php'),
+										generateUrl('/apps/transfer/ajax/probe.php'),
 										{ params: { url: rows[i].url } },
 									)
 									rows[i].probedExt = resp.data.extension || ''
@@ -677,7 +677,7 @@ function showDialog(currentPath) {
 
 			try {
 				const resp = await axios.post(
-					generateFilePath('transfer', 'ajax', 'batch.php'),
+					generateUrl('/apps/transfer/ajax/batch.php'),
 					{ transfers },
 				)
 				for (const job of resp.data.jobs) {
@@ -721,8 +721,12 @@ addNewFileMenuEntry({
 // Pre-populate the panel with jobs from other tabs or previous sessions.
 async function initPanel() {
 	try {
-		const resp = await axios.get(generateFilePath('transfer', 'ajax', 'status.php'))
 		const oneHourAgo = Math.floor(Date.now() / 1000) - 3600
+		// Pass since= so the server only returns the last hour; active jobs in
+		// that window cover most cases (jobs running >1 h are an edge case).
+		const resp = await axios.get(generateUrl('/apps/transfer/ajax/status.php'), {
+			params: { since: oneHourAgo },
+		})
 
 		for (const job of resp.data) {
 			const active = isActiveStatus(job.status)

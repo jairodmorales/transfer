@@ -1,8 +1,8 @@
 <?php
 /** @var array $_ */
 /** @var int $_['maxUrls'] */
+/** @var int $_['retentionDays'] */
 
-use OCP\Defaults;
 use OCP\IL10N;
 
 /** @var IL10N $l */
@@ -30,6 +30,22 @@ script('transfer', 'transfer-main');
 			/>
 			<em class="transfer-admin-hint">
 				<?php p($l->t('Between 1 and 10. Users will not be able to add more URL rows than this limit.')); ?>
+			</em>
+		</div>
+
+		<div class="transfer-admin-row">
+			<label for="transfer-retention-days"><?php p($l->t('Job history retention')); ?></label>
+			<input
+				id="transfer-retention-days"
+				type="number"
+				name="retentionDays"
+				min="1"
+				max="365"
+				step="1"
+				value="<?php p($_['retentionDays']); ?>"
+			/>
+			<em class="transfer-admin-hint">
+				<?php p($l->t('Days to keep completed transfer records. Older rows are deleted automatically once a week.')); ?>
 			</em>
 		</div>
 
@@ -69,27 +85,40 @@ script('transfer', 'transfer-main');
 
 	form.addEventListener('submit', function (e) {
 		e.preventDefault();
-		var val = parseInt(document.getElementById('transfer-max-urls').value, 10);
-		if (isNaN(val) || val < 1 || val > 10) {
-			msg.textContent = t('transfer', 'Value must be between 1 and 10.');
+
+		var maxUrls = parseInt(document.getElementById('transfer-max-urls').value, 10);
+		if (isNaN(maxUrls) || maxUrls < 1 || maxUrls > 10) {
+			msg.textContent = t('transfer', 'Maximum URLs must be between 1 and 10.');
 			msg.className = 'msg error';
 			msg.style.display = '';
 			return;
 		}
 
-		OCP.AppConfig.setValue('transfer', 'max_urls', String(val), {
-			success: function () {
-				msg.textContent = t('transfer', 'Saved');
-				msg.className = 'msg success';
-				msg.style.display = '';
-				setTimeout(function () { msg.style.display = 'none'; }, 3000);
-			},
-			error: function () {
-				msg.textContent = t('transfer', 'Error saving settings.');
-				msg.className = 'msg error';
-				msg.style.display = '';
-			},
-		});
+		var retentionDays = parseInt(document.getElementById('transfer-retention-days').value, 10);
+		if (isNaN(retentionDays) || retentionDays < 1 || retentionDays > 365) {
+			msg.textContent = t('transfer', 'Retention must be between 1 and 365 days.');
+			msg.className = 'msg error';
+			msg.style.display = '';
+			return;
+		}
+
+		var saved = 0;
+		function onSaved() {
+			saved++;
+			if (saved < 2) return;
+			msg.textContent = t('transfer', 'Saved');
+			msg.className = 'msg success';
+			msg.style.display = '';
+			setTimeout(function () { msg.style.display = 'none'; }, 3000);
+		}
+		function onError() {
+			msg.textContent = t('transfer', 'Error saving settings.');
+			msg.className = 'msg error';
+			msg.style.display = '';
+		}
+
+		OCP.AppConfig.setValue('transfer', 'max_urls', String(maxUrls), { success: onSaved, error: onError });
+		OCP.AppConfig.setValue('transfer', 'retention_days', String(retentionDays), { success: onSaved, error: onError });
 	});
 }());
 </script>

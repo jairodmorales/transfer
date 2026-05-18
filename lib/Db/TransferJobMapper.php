@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace OCA\Transfer\Db;
 
-use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Db\QBMapper;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
@@ -15,24 +14,6 @@ use OCP\IDBConnection;
 class TransferJobMapper extends QBMapper {
 	public function __construct(IDBConnection $db) {
 		parent::__construct($db, 'transfer_jobs', TransferJobEntity::class);
-	}
-
-	/**
-	 * Find a specific job by its token, scoped to a user.
-	 *
-	 * The user_id constraint prevents one user from reading another user's job
-	 * status even if they somehow obtain the token.
-	 *
-	 * @throws DoesNotExistException
-	 */
-	public function findByToken(string $token, string $userId): TransferJobEntity {
-		$qb = $this->db->getQueryBuilder();
-		$qb->select('*')
-			->from($this->getTableName())
-			->where($qb->expr()->eq('token', $qb->createNamedParameter($token)))
-			->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
-
-		return $this->findEntity($qb);
 	}
 
 	/**
