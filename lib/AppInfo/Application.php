@@ -7,6 +7,7 @@ namespace OCA\Transfer\AppInfo;
 use OCA\Files\Event\LoadAdditionalScriptsEvent;
 use OCA\Transfer\BackgroundJob\CleanupJob;
 use OCA\Transfer\Listeners\LoadAdditionalScriptsListener;
+use OCA\Transfer\Notification\Notifier;
 use OCP\AppFramework\App;
 use OCP\AppFramework\Bootstrap\IBootstrap;
 use OCP\AppFramework\Bootstrap\IBootContext;
@@ -20,6 +21,7 @@ class Application extends App implements IBootstrap {
 	public function register(IRegistrationContext $context): void {
 		$context->registerEventListener(LoadAdditionalScriptsEvent::class, LoadAdditionalScriptsListener::class);
 		$context->registerBackgroundJob(CleanupJob::class);
+		$context->registerNotifierService(Notifier::class);
 	}
 
 	public function boot(IBootContext $context): void {
