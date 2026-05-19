@@ -28,7 +28,7 @@ class Admin implements ISettings {
 	 * 'additional' is the generic bucket for app-specific settings.
 	 */
 	public function getSection(): string {
-		return 'additional';
+		return 'transfer';
 	}
 
 	public function getPriority(): int {

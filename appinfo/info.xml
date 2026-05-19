@@ -24,6 +24,7 @@
 	</dependencies>
 	<settings>
 		<admin>OCA\Transfer\Settings\Admin</admin>
+		<admin-section>OCA\Transfer\Settings\Section</admin-section>
 	</settings>
 	<activity>
 		<settings>
@@ -40,4 +41,7 @@
 			<provider>OCA\Transfer\Activity\Providers\TransferSucceededProvider</provider>
 		</providers>
 	</activity>
+	<background-jobs>
+		<job>OCA\Transfer\BackgroundJob\CleanupJob</job>
+	</background-jobs>
 </info>

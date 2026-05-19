@@ -20,7 +20,6 @@ class Application extends App implements IBootstrap {
 
 	public function register(IRegistrationContext $context): void {
 		$context->registerEventListener(LoadAdditionalScriptsEvent::class, LoadAdditionalScriptsListener::class);
-		$context->registerBackgroundJob(CleanupJob::class);
 		$context->registerNotifierService(Notifier::class);
 	}
 

@@ -182,8 +182,11 @@ const STYLES = `
 
 /* ── Floating status panel ─────────────────────────────────────────────────── */
 .transfer-panel {
-	position: fixed;
-	bottom: 16px;
+	position: fixed !important;
+	top: auto !important;
+	left: auto !important;
+	right: 16px !important;
+	bottom: 16px !important;
 	inset-inline-end: 16px;
 	z-index: 9999;
 	width: 320px;
@@ -204,6 +207,14 @@ const STYLES = `
 	font-weight: 600;
 	font-size: 0.9em;
 }
+/* Container for the two header action buttons */
+.transfer-panel__actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+}
+/* Shared style for minimize [−] and close [✕] buttons in the panel header */
+.transfer-panel__minimize,
 .transfer-panel__close {
 	background: none;
 	border: none;
@@ -211,10 +222,15 @@ const STYLES = `
 	cursor: pointer;
 	font-size: 1.2em;
 	line-height: 1;
-	padding: 0 2px;
+	padding: 2px 5px;
 	opacity: 0.8;
+	border-radius: var(--border-radius, 4px);
 }
-.transfer-panel__close:hover { opacity: 1; }
+.transfer-panel__minimize:hover,
+.transfer-panel__close:hover {
+	opacity: 1;
+	background: rgba(255, 255, 255, 0.18);
+}
 .transfer-panel__list {
 	max-height: 240px;
 	overflow-y: auto;
@@ -260,6 +276,53 @@ const STYLES = `
 	animation: transfer-spin 1.2s linear infinite;
 	display: block;
 }
+
+/* ── Minimized badge ───────────────────────────────────────────────────────── */
+/* Circular button shown in the bottom-right corner when the panel is minimized.
+   Uses !important on positioning — same reasoning as .transfer-panel — to prevent
+   Nextcloud's SPA parent transforms from breaking fixed positioning. */
+.transfer-badge {
+	position: fixed !important;
+	bottom: 16px !important;
+	right: 16px !important;
+	top: auto !important;
+	left: auto !important;
+	z-index: 9999;
+	width: 48px;
+	height: 48px;
+	border-radius: 50%;
+	background: var(--color-primary-element, #0082c9);
+	color: var(--color-primary-element-text, #fff);
+	border: none;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+	padding: 0;
+	transition: transform 0.15s;
+}
+.transfer-badge:hover { transform: scale(1.1); }
+.transfer-badge svg { width: 22px; height: 22px; fill: currentColor; }
+/* Red bubble showing the number of active (queued/running) transfers */
+.transfer-badge__count {
+	position: absolute;
+	top: -4px;
+	right: -4px;
+	background: var(--color-error, #e9322d);
+	color: #fff;
+	border-radius: 10px;
+	min-width: 18px;
+	height: 18px;
+	padding: 0 4px;
+	font-size: 0.7em;
+	font-weight: 700;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	line-height: 1;
+}
 `
 
 const SPIN_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 4V2A10 10 0 0 0 2 12h2a8 8 0 0 1 8-8Z"/></svg>'
@@ -281,8 +344,15 @@ function injectStyles() {
 // token → { path, status, error }
 const trackedJobs = new Map()
 let panelEl = null
+let badgeEl = null   // circular badge shown when panel is minimized
 let pollTimer = null
+
+// panelHidden and panelMinimized are mutually exclusive:
+//   panelHidden=true  → panel fully dismissed (no panel, no badge)
+//   panelMinimized=true → panel collapsed to badge
+//   both false         → panel fully visible
 let panelHidden = false
+let panelMinimized = false
 
 function esc(s) {
 	return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
@@ -318,20 +388,96 @@ function scheduleJobPrune(token) {
 	setTimeout(() => trackedJobs.delete(token), 30000)
 }
 
-function renderPanel() {
-	if (trackedJobs.size === 0) {
-		panelEl?.remove()
-		panelEl = null
+// ─────────────────────────────────────────────────────────────────────────────
+// Badge (minimized state)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Render or update the circular minimized badge.
+ * Shows the upload icon plus an active-job count bubble.
+ * Clicking it restores the full panel.
+ * Re-appends to document.body if SPA navigation removed it.
+ */
+function renderBadge() {
+	injectStyles()
+
+	// Badge should only exist when panel is minimized and there are jobs to show.
+	if (!panelMinimized || trackedJobs.size === 0) {
+		badgeEl?.remove()
+		badgeEl = null
 		return
 	}
 
-	if (panelHidden) return
+	if (!badgeEl) {
+		badgeEl = document.createElement('button')
+		badgeEl.className = 'transfer-badge'
+		badgeEl.setAttribute('title', t('transfer', 'Show transfers'))
+		badgeEl.setAttribute('aria-label', t('transfer', 'Show transfers'))
+		document.body.appendChild(badgeEl)
+
+		// Click → expand back to full panel
+		badgeEl.addEventListener('click', () => {
+			panelMinimized = false
+			badgeEl.remove()
+			badgeEl = null
+			renderPanel()
+		})
+	} else if (badgeEl.parentNode !== document.body) {
+		// SPA navigation can detach the badge — re-attach it.
+		document.body.appendChild(badgeEl)
+	}
+
+	const activeCount = [...trackedJobs.values()].filter(j => isActiveStatus(j.status)).length
+	const countHtml = activeCount > 0
+		? `<span class="transfer-badge__count">${activeCount}</span>`
+		: ''
+	// Re-render badge content on every call so the count stays current during polls.
+	badgeEl.innerHTML = `${CLOUD_UPLOAD_SVG}${countHtml}`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+function renderPanel() {
+	injectStyles()
+
+	if (trackedJobs.size === 0) {
+		// Nothing to show — remove both panel and badge.
+		panelEl?.remove()
+		panelEl = null
+		badgeEl?.remove()
+		badgeEl = null
+		return
+	}
+
+	// ── Fully closed: hide panel, hide badge ──────────────────────────────────
+	if (panelHidden) {
+		badgeEl?.remove()
+		badgeEl = null
+		return
+	}
+
+	// ── Minimized: hide panel, show badge ─────────────────────────────────────
+	if (panelMinimized) {
+		panelEl?.remove()
+		panelEl = null
+		renderBadge()
+		return
+	}
+
+	// ── Normal: show panel, hide badge ────────────────────────────────────────
+	badgeEl?.remove()
+	badgeEl = null
 
 	if (!panelEl) {
 		panelEl = document.createElement('div')
 		panelEl.className = 'transfer-panel'
 		panelEl.setAttribute('role', 'status')
 		panelEl.setAttribute('aria-live', 'polite')
+		document.body.appendChild(panelEl)
+	} else if (panelEl.parentNode !== document.body) {
+		// SPA navigation can detach the panel — re-attach it.
 		document.body.appendChild(panelEl)
 	}
 
@@ -354,11 +500,23 @@ function renderPanel() {
 	panelEl.innerHTML = `
 		<div class="transfer-panel__header">
 			<span>${headerLabel}</span>
-			<button class="transfer-panel__close" aria-label="${t('transfer', 'Dismiss')}">✕</button>
+			<div class="transfer-panel__actions">
+				<button class="transfer-panel__minimize" aria-label="${t('transfer', 'Minimize')}">−</button>
+				<button class="transfer-panel__close"    aria-label="${t('transfer', 'Close')}">✕</button>
+			</div>
 		</div>
 		<div class="transfer-panel__list">${itemsHtml}</div>
 	`
 
+	// [−] Minimize: collapse panel to circular badge in the same corner.
+	panelEl.querySelector('.transfer-panel__minimize').addEventListener('click', () => {
+		panelMinimized = true
+		panelEl.remove()
+		panelEl = null
+		renderBadge()
+	})
+
+	// [✕] Close: dismiss everything. A new transfer will reopen the panel.
 	panelEl.querySelector('.transfer-panel__close').addEventListener('click', () => {
 		panelHidden = true
 		panelEl.remove()
@@ -396,9 +554,18 @@ async function doPoll() {
 	scheduleNextPoll()
 }
 
+/**
+ * Register a new job and ensure the panel is visible.
+ * Resets both panelHidden and panelMinimized so the panel always surfaces
+ * when the user submits a new transfer, regardless of previous state.
+ */
 function trackJob(token, path) {
 	trackedJobs.set(token, { path, status: 'queued', error: null })
+	// A new transfer always brings the panel back — clear hidden & minimized.
 	panelHidden = false
+	panelMinimized = false
+	badgeEl?.remove()
+	badgeEl = null
 	renderPanel()
 	scheduleNextPoll()
 }

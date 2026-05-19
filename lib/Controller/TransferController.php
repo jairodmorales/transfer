@@ -23,7 +23,7 @@ use OCA\Transfer\Service\TransferService;
 use OCA\Transfer\Service\TransferUtils;
 
 class TransferController extends Controller {
-	private string $userId;
+	private ?string $userId;
 	private IJobList $jobList;
 	private IClientService $clientService;
 	private TransferService $service;
@@ -80,7 +80,7 @@ class TransferController extends Controller {
 		ISecureRandom $secureRandom,
 		TransferJobMapper $mapper,
 		IAppConfig $appConfig,
-		string $UserId,
+		?string $UserId,
 	) {
 		parent::__construct($AppName, $request);
 		$this->userId = $UserId;

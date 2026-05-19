@@ -226,7 +226,9 @@ class TransferService {
 			$this->sendNotification($userId, $token, Notifier::SUBJECT_FAILED, $filename, 'Could not write file');
 			return false;
 		} finally {
-			fclose($stream);
+			if (is_resource($stream)) {
+				fclose($stream);
+			}
 		}
 		$this->cleanupTempFile($tmpPath);
 
